@@ -1,0 +1,44 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: 'Roboto', sans-serif;
+}
+
+/* Professional Typography Hierarchy Overrides */
+.prose-professional {
+  color: #334155; /* Slate 700 */
+  line-height: 1.6;
+}
+
+.prose-professional h1 {
+  color: #1e3a8a !important; /* Blue 900 */
+  font-weight: 700;
+  border-bottom: 1px solid #e2e8f0;
+  padding-bottom: 0.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.prose-professional h2 {
+  color: #1e3a8a !important;
+  font-weight: 600;
+  margin-top: 2rem;
+  margin-bottom: 1rem;
+}
+
+.prose-professional strong {
+  color: #1e293b;
+}
+
+/* Custom scrollbar for markdown areas */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 8px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background-color: #cbd5e1;
+  border-radius: 20px;
+}

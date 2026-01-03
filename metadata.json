@@ -1,0 +1,7 @@
+{
+  "name": "MeetingGeniusPaywall",
+  "description": "AI-powered meeting assistant that records, transcribes, and generates structured notes using Gemini 3.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
