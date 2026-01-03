@@ -75,7 +75,12 @@ const App: React.FC = () => {
     if ((window as any).google) {
       google.accounts.id.initialize({
         client_id: (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID || 'YOUR_GOOGLE_CLIENT_ID',
-        callback: handleCredentialResponse
+        callback: handleCredentialResponse,
+        // CRITICAL FIX: Disable FedCM to resolve 'identity-credentials-get' NotAllowedError
+        // This is often required in iframed or restricted environments like Netlify preview
+        use_fedcm_for_prompt: false,
+        auto_select: false,
+        itp_support: true
       });
       google.accounts.id.prompt(); // Display One Tap
     }
@@ -115,7 +120,14 @@ const App: React.FC = () => {
   const handleLogin = () => {
     // Fix: Cast window to any to access the global 'google' object and resolve TS error
     if ((window as any).google) {
-      google.accounts.id.prompt();
+      // Re-trigger the prompt to ensure user can sign in manually if One Tap fails or is closed
+      google.accounts.id.prompt((notification: any) => {
+        if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
+          // If the prompt is blocked or skipped, we could potentially show a button 
+          // or use the standard sign-in button if we had one.
+          console.log("One Tap skipped or not displayed", notification.getNotDisplayedReason());
+        }
+      });
     }
   };
 
@@ -185,15 +197,11 @@ const App: React.FC = () => {
 
     try {
       addLog("Starting analysis...");
-      const newData = await processMeetingAudio(combinedBlob, combinedBlob.type || 'audio/webm', 'ALL', selectedModel, addLog);
+      const newData = await processMeetingAudio(combinedBlob, combinedBlob.type || 'audio/webm', 'ALL', selectedModel, addLog, user.uid);
       
       setMeetingData(newData);
       setAppState(AppState.COMPLETED);
 
-      // Update local usage state
-      const audioDuration = Math.round(combinedBlob.size / (64000 / 8)); // rough estimation if needed, or use recordingTime
-      // We rely on backend to update actual usage in blobs
-      
       deleteSessionData(sessionIdRef.current).catch(() => {});
       if (isDriveConnected) autoSyncToDrive(newData, finalTitle, combinedBlob);
     } catch (apiError) {
@@ -274,6 +282,7 @@ const App: React.FC = () => {
               debugLogs={debugLogs}
               user={user}
               onUpgrade={handleUpgrade}
+              onLogin={handleLogin}
             />
           </div>
         )}

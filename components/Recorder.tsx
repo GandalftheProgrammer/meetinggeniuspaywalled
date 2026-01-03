@@ -1,6 +1,6 @@
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { Mic, Square, Loader2, MonitorPlay, Trash2, Circle, FileAudio, ListChecks, FileText, CheckCircle, Upload, AlertTriangle, Crown } from 'lucide-react';
+import { Mic, Square, Loader2, MonitorPlay, Trash2, Circle, FileAudio, ListChecks, FileText, CheckCircle, Upload, AlertTriangle, Crown, Lock } from 'lucide-react';
 import AudioVisualizer from './AudioVisualizer';
 import { AppState, ProcessingMode, UserProfile } from '../types';
 
@@ -17,6 +17,7 @@ interface RecorderProps {
   debugLogs: string[];
   user: UserProfile | null;
   onUpgrade: () => void;
+  onLogin: () => void;
 }
 
 type AudioSource = 'microphone' | 'system';
@@ -31,7 +32,8 @@ const Recorder: React.FC<RecorderProps> = ({
   audioUrl, 
   debugLogs,
   user,
-  onUpgrade
+  onUpgrade,
+  onLogin
 }) => {
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
@@ -63,16 +65,25 @@ const Recorder: React.FC<RecorderProps> = ({
     };
   }, []);
 
-  // Usage Monitor logic
+  // Usage Monitor logic - More aggressive check
   useEffect(() => {
-    if (isRecording && user && !user.isPro) {
-      const totalUsed = user.secondsUsed + recordingTime;
-      if (totalUsed >= FREE_LIMIT_SECONDS) {
+    if (isRecording) {
+      if (!user) {
+        // If somehow they start recording without being logged in, stop them
         stopRecording();
-        setLimitReached(true);
+        onLogin();
+        return;
+      }
+      
+      if (!user.isPro) {
+        const totalUsedSoFar = user.secondsUsed + recordingTime;
+        if (totalUsedSoFar >= FREE_LIMIT_SECONDS) {
+          stopRecording();
+          setLimitReached(true);
+        }
       }
     }
-  }, [recordingTime, isRecording, user]);
+  }, [recordingTime, isRecording, user, onLogin]);
 
   useEffect(() => {
     if (logsEndRef.current) {
@@ -99,7 +110,12 @@ const Recorder: React.FC<RecorderProps> = ({
   };
 
   const startRecording = async () => {
-    if (limitReached && user && !user.isPro) return;
+    if (!user) {
+      onLogin();
+      return;
+    }
+    
+    if (limitReached && !user.isPro) return;
     
     try {
       if (silentAudioRef.current) silentAudioRef.current.play().catch(() => {});
@@ -190,8 +206,28 @@ const Recorder: React.FC<RecorderProps> = ({
 
   return (
     <div className="relative w-full max-w-lg mx-auto bg-white rounded-2xl shadow-xl border border-slate-100 p-6 md:p-8 flex flex-col items-center transition-all">
+      
+      {/* Login Required Overlay */}
+      {!user && (
+        <div className="absolute inset-0 z-30 bg-slate-50/80 backdrop-blur-[2px] rounded-2xl flex flex-col items-center justify-center p-8 text-center animate-in fade-in duration-300">
+          <div className="p-4 bg-blue-50 rounded-full mb-4">
+            <Lock className="w-8 h-8 text-blue-500" />
+          </div>
+          <h3 className="text-lg font-bold text-slate-800 mb-2">Sign in to start</h3>
+          <p className="text-slate-500 text-sm mb-6 max-w-[200px]">
+            Please sign in with Google to use your free 5 hours of note taking.
+          </p>
+          <button 
+            onClick={onLogin}
+            className="flex items-center gap-2 px-6 py-2.5 bg-blue-600 text-white rounded-full font-bold shadow-md hover:bg-blue-700 transition-all"
+          >
+            Sign In with Google
+          </button>
+        </div>
+      )}
+
       {/* Limit Reached Overlay */}
-      {limitReached && (
+      {limitReached && user && (
         <div className="absolute inset-0 z-20 bg-white/95 backdrop-blur-sm rounded-2xl flex flex-col items-center justify-center p-8 text-center animate-in fade-in duration-300">
           <div className="p-4 bg-orange-50 rounded-full mb-4">
             <AlertTriangle className="w-10 h-10 text-orange-500" />
@@ -219,26 +255,26 @@ const Recorder: React.FC<RecorderProps> = ({
       )}
 
       {!isMobile && (
-        <div className={`w-full mb-6 transition-opacity ${isRecording ? 'opacity-50 pointer-events-none' : 'opacity-100'}`}>
+        <div className={`w-full mb-6 transition-opacity ${isRecording || !user ? 'opacity-50 pointer-events-none' : 'opacity-100'}`}>
           <div className="flex bg-slate-100 p-1 rounded-lg w-full">
-            <button onClick={() => setAudioSource('microphone')} disabled={isRecording} className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-all ${audioSource === 'microphone' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Microphone</button>
-            <button onClick={() => setAudioSource('system')} disabled={isRecording} className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-all ${audioSource === 'system' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>System + Mic</button>
+            <button onClick={() => setAudioSource('microphone')} disabled={isRecording || !user} className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-all ${audioSource === 'microphone' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Microphone</button>
+            <button onClick={() => setAudioSource('system')} disabled={isRecording || !user} className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-all ${audioSource === 'system' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>System + Mic</button>
           </div>
         </div>
       )}
 
-      <div className="w-full h-24 mb-6 bg-slate-50 rounded-xl flex items-center justify-center border border-slate-100 overflow-hidden relative">
+      <div className={`w-full h-24 mb-6 bg-slate-50 rounded-xl flex items-center justify-center border border-slate-100 overflow-hidden relative ${!user ? 'grayscale opacity-50' : ''}`}>
         {isRecording || hasRecordedData ? <AudioVisualizer stream={stream} isRecording={isRecording} /> : <div className="text-slate-400 text-sm font-medium">Ready to record</div>}
       </div>
 
-      <div className={`text-5xl font-mono font-semibold mb-8 tracking-wider ${isRecording ? 'text-red-500' : 'text-slate-700'}`}>
+      <div className={`text-5xl font-mono font-semibold mb-8 tracking-wider ${isRecording ? 'text-red-500' : 'text-slate-700'} ${!user ? 'opacity-30' : ''}`}>
         {formatTime(recordingTime)}
       </div>
 
       <div className="flex flex-col items-center justify-center w-full mb-6 gap-4">
         <button
           onClick={toggleRecording}
-          disabled={limitReached && !user?.isPro}
+          disabled={!user || (limitReached && !user?.isPro)}
           className={`group flex items-center justify-center w-20 h-20 rounded-full shadow-md transition-all duration-200 focus:outline-none ${
             isRecording ? 'bg-slate-900 hover:bg-slate-800' : 'bg-red-500 hover:bg-red-600 disabled:bg-slate-300'
           }`}
@@ -246,7 +282,7 @@ const Recorder: React.FC<RecorderProps> = ({
           {isRecording ? <Square className="w-8 h-8 text-white fill-current" /> : <Circle className="w-8 h-8 text-white fill-current" />}
         </button>
         
-        {!isRecording && !hasRecordedData && (
+        {!isRecording && !hasRecordedData && user && (
             <div>
                 <input type="file" accept="audio/*" ref={fileInputRef} onChange={handleFileSelect} className="hidden" />
                 <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 text-slate-500 hover:text-blue-600 text-sm font-medium transition-colors px-4 py-2 rounded-full hover:bg-blue-50">
@@ -255,11 +291,11 @@ const Recorder: React.FC<RecorderProps> = ({
             </div>
         )}
         <p className="mt-2 text-slate-400 text-sm font-medium">
-          {isRecording ? "Recording..." : limitReached ? "Limit Reached" : hasRecordedData ? "Paused" : "Start Recording"}
+          {isRecording ? "Recording..." : !user ? "Sign in to record" : limitReached ? "Limit Reached" : hasRecordedData ? "Paused" : "Start Recording"}
         </p>
       </div>
 
-      {!isRecording && hasRecordedData && (
+      {!isRecording && hasRecordedData && user && (
         <div className="w-full border-t border-slate-100 pt-6 text-center">
           {audioUrl && (
             <div className="w-full bg-slate-50 p-3 rounded-xl border border-slate-200 mb-6 flex flex-col gap-2">

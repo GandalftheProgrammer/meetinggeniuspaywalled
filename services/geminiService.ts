@@ -11,7 +11,8 @@ export const processMeetingAudio = async (
   defaultMimeType: string, 
   mode: ProcessingMode = 'ALL',
   model: GeminiModel,
-  onLog?: (msg: string) => void
+  onLog?: (msg: string) => void,
+  uid?: string
 ): Promise<MeetingData> => {
   const log = (msg: string) => {
       console.log(msg);
@@ -61,7 +62,7 @@ export const processMeetingAudio = async (
     const triggerResp = await fetch('/.netlify/functions/gemini-background', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jobId, totalChunks: chunkIndex, mimeType, mode: 'ALL', model, fileSize: totalBytes })
+        body: JSON.stringify({ jobId, totalChunks: chunkIndex, mimeType, mode: 'ALL', model, fileSize: totalBytes, uid })
     });
 
     if (!triggerResp.ok) {
