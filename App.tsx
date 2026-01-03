@@ -260,7 +260,7 @@ const App: React.FC = () => {
     <div className="min-h-screen bg-slate-50 flex flex-col">
       <Header 
         isDriveConnected={isDriveConnected} 
-        onConnectDrive={connectToDrive} 
+        onConnectDrive={() => connectToDrive(user?.email)} 
         onDisconnectDrive={handleLogout}
         selectedModel={selectedModel}
         onModelChange={setSelectedModel}
@@ -315,7 +315,7 @@ const App: React.FC = () => {
           <Results 
             data={meetingData} title={title} onReset={handleDiscard}
             onGenerateMissing={() => {}} isProcessingMissing={false}
-            isDriveConnected={isDriveConnected} onConnectDrive={connectToDrive}
+            isDriveConnected={isDriveConnected} onConnectDrive={() => connectToDrive(user?.email)}
             audioBlob={combinedBlob} initialMode={lastRequestedMode}
             sessionDateString={sessionStartTime ? formatMeetingDateTime(sessionStartTime) : formatMeetingDateTime(new Date())}
           />

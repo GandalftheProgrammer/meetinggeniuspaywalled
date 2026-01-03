@@ -23,7 +23,8 @@ const Results: React.FC<ResultsProps> = ({
   onReset, 
   audioBlob,
   initialMode = 'NOTES_ONLY',
-  sessionDateString = ''
+  sessionDateString = '',
+  onConnectDrive
 }) => {
   const [showNotes, setShowNotes] = useState(initialMode !== 'TRANSCRIPT_ONLY');
   const [showTranscript, setShowTranscript] = useState(initialMode !== 'NOTES_ONLY');
