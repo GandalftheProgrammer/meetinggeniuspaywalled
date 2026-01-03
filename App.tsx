@@ -32,7 +32,7 @@ const App: React.FC = () => {
   const [debugLogs, setDebugLogs] = useState<string[]>([]);
   const [sessionStartTime, setSessionStartTime] = useState<Date | null>(null);
 
-  // Refs for Google Auth clients
+  // Ref for the explicit OAuth2 token client (more reliable for manual clicks)
   const tokenClientRef = useRef<any>(null);
 
   const addLog = (msg: string) => {
@@ -45,18 +45,6 @@ const App: React.FC = () => {
     return `${day} ${months[date.getMonth()]} ${date.getFullYear()} at ${date.getHours().toString().padStart(2, '0')}h${date.getMinutes().toString().padStart(2, '0')}m`;
   };
 
-  // 1. Handle One Tap / ID Token Response
-  const handleIdResponse = async (response: any) => {
-    try {
-      const decoded = JSON.parse(atob(response.credential.split('.')[1]));
-      fetchUserProfile(decoded.email, decoded.sub);
-    } catch (err) {
-      console.error("Auth profile error:", err);
-      setError("Failed to load user profile.");
-    }
-  };
-
-  // 2. Fetch/Sync user profile from Netlify
   const fetchUserProfile = async (email: string, uid: string) => {
     try {
       addLog(`Syncing profile for ${email}...`);
@@ -67,9 +55,18 @@ const App: React.FC = () => {
       });
       const profile = await res.json();
       setUser(profile);
-      addLog("Profile ready.");
+      addLog("Profile synchronized.");
     } catch (err) {
-      setError("Failed to connect to user database.");
+      setError("Database connection error. Please try again.");
+    }
+  };
+
+  const handleIdResponse = async (response: any) => {
+    try {
+      const decoded = JSON.parse(atob(response.credential.split('.')[1]));
+      fetchUserProfile(decoded.email, decoded.sub);
+    } catch (err) {
+      console.error("Auth profile error:", err);
     }
   };
 
@@ -78,7 +75,7 @@ const App: React.FC = () => {
       const CLIENT_ID = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID;
       if (!CLIENT_ID || !(window as any).google) return;
 
-      // Initialize One Tap (Top right)
+      // 1. Initialize for One Tap (Automatic top right)
       google.accounts.id.initialize({
         client_id: CLIENT_ID,
         callback: handleIdResponse,
@@ -87,25 +84,28 @@ const App: React.FC = () => {
       });
       google.accounts.id.prompt();
 
-      // Initialize Token Client (For manual buttons)
+      // 2. Initialize for Manual Buttons (Popup flow)
       tokenClientRef.current = google.accounts.oauth2.initTokenClient({
         client_id: CLIENT_ID,
         scope: 'email profile openid',
         callback: async (tokenResponse: any) => {
           if (tokenResponse.access_token) {
-            // Get user info using the access token
-            const info = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-              headers: { Authorization: `Bearer ${tokenResponse.access_token}` }
-            }).then(r => r.json());
-            fetchUserProfile(info.email, info.sub);
+            // Get user info via access token
+            try {
+              const info = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+                headers: { Authorization: `Bearer ${tokenResponse.access_token}` }
+              }).then(r => r.json());
+              fetchUserProfile(info.email, info.sub);
+            } catch (e) {
+              console.error("Token info fetch failed", e);
+            }
           }
         },
       });
       
-      addLog("Google Auth System Active.");
+      addLog("Auth system ready.");
     };
 
-    // Robust loading check
     if ((window as any).google) {
       initAuth();
     } else {
@@ -125,12 +125,12 @@ const App: React.FC = () => {
 
   const handleLogin = () => {
     if (tokenClientRef.current) {
-      addLog("Opening login popup...");
+      addLog("Starting secure login...");
       tokenClientRef.current.requestAccessToken();
     } else {
-      // Fallback if token client isn't ready
+      // Emergency fallback
       google?.accounts?.id?.prompt();
-      addLog("Retrying auth initialization...");
+      addLog("Auth client not ready, trying prompt...");
     }
   };
 

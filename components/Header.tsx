@@ -1,6 +1,6 @@
 
 import React from 'react';
-import { CheckCircle2, Bot, ChevronDown, Crown, User as UserIcon, LogIn } from 'lucide-react';
+import { CheckCircle2, Bot, ChevronDown, Crown, User as UserIcon } from 'lucide-react';
 import { GeminiModel, UserProfile, FREE_LIMIT_SECONDS } from '../types';
 
 interface HeaderProps {
@@ -131,7 +131,7 @@ const Header: React.FC<HeaderProps> = ({
                     onClick={onLogin}
                     className="flex items-center gap-2 px-4 py-1.5 bg-blue-600 text-white rounded-full text-xs md:text-sm font-bold shadow-md hover:bg-blue-700 transition-all"
                   >
-                    <LogIn className="w-4 h-4" />
+                    <UserIcon className="w-4 h-4" />
                     <span>Sign In</span>
                   </button>
                 )}
