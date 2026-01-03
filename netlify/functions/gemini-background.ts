@@ -1,7 +1,6 @@
 
 import { getStore } from "@netlify/blobs";
 import { Buffer } from "node:buffer";
-import { GoogleGenAI, Type } from "@google/genai";
 
 // 5 hours in seconds
 const FREE_LIMIT_SECONDS = 18000;
@@ -9,13 +8,18 @@ const FREE_LIMIT_SECONDS = 18000;
 export default async (req: Request) => {
   if (req.method !== 'POST') return new Response("OK");
 
-  const apiKey = process.env.API_KEY;
+  // 1. CLEAN API KEY (from working version pattern)
+  let apiKey = process.env.API_KEY ? process.env.API_KEY.trim() : "";
+  if (apiKey.startsWith('"') && apiKey.endsWith('"')) {
+      apiKey = apiKey.slice(1, -1);
+  }
+  
   if (!apiKey) {
-    console.error("Gemini Background: API_KEY is missing in environment.");
+    console.error("Gemini Background: API_KEY is missing.");
     return new Response("API_KEY missing", { status: 500 });
   }
 
-  const ai = new GoogleGenAI({ apiKey: apiKey });
+  const encodedKey = encodeURIComponent(apiKey);
   let jobId: string = "";
 
   try {
@@ -42,13 +46,12 @@ export default async (req: Request) => {
     const resultStore = getStore({ name: "meeting-results", consistency: "strong" });
     const uploadStore = getStore({ name: "meeting-uploads", consistency: "strong" });
 
-    // USE HEADERS INSTEAD OF QUERY PARAMS FOR 401 STABILITY
-    const handshakeUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files`;
+    // 2. INITIALIZE UPLOAD VIA URL AUTH
+    const handshakeUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodedKey}`;
     
     const initResp = await fetch(handshakeUrl, {
         method: 'POST',
         headers: {
-            'x-goog-api-key': apiKey,
             'X-Goog-Upload-Protocol': 'resumable',
             'X-Goog-Upload-Command': 'start',
             'X-Goog-Upload-Header-Content-Length': String(fileSize),
@@ -63,10 +66,16 @@ export default async (req: Request) => {
       throw new Error(`Gemini Handshake failed (${initResp.status}): ${errText}`);
     }
 
-    const uploadUrl = initResp.headers.get('x-goog-upload-url') || "";
+    // 3. PATCH UPLOAD URL WITH KEY
+    let uploadUrl = initResp.headers.get('x-goog-upload-url') || "";
     if (!uploadUrl) throw new Error("No upload URL returned from Google.");
+    
+    if (!uploadUrl.includes('key=')) {
+        const sep = uploadUrl.includes('?') ? '&' : '?';
+        uploadUrl = `${uploadUrl}${sep}key=${encodedKey}`;
+    }
 
-    const GEMINI_CHUNK_SIZE = 2 * 1024 * 1024; 
+    const GEMINI_CHUNK_SIZE = 4 * 1024 * 1024; 
     let buffer = Buffer.alloc(0);
     let uploadOffset = 0;
 
@@ -85,7 +94,6 @@ export default async (req: Request) => {
             const up = await fetch(uploadUrl, {
                 method: 'POST',
                 headers: {
-                    'x-goog-api-key': apiKey,
                     'X-Goog-Upload-Command': 'upload',
                     'X-Goog-Upload-Offset': String(uploadOffset),
                     'Content-Type': 'application/octet-stream'
@@ -100,7 +108,6 @@ export default async (req: Request) => {
     const finalResp = await fetch(uploadUrl, {
         method: 'POST',
         headers: {
-            'x-goog-api-key': apiKey,
             'X-Goog-Upload-Command': 'upload, finalize',
             'X-Goog-Upload-Offset': String(uploadOffset),
             'Content-Type': 'application/octet-stream'
@@ -113,11 +120,10 @@ export default async (req: Request) => {
     const fileResult = await finalResp.json();
     const fileUri = fileResult.file?.uri || fileResult.uri;
     
+    // 4. POLL FOR ACTIVE (URL AUTH)
     let isReady = false;
     for (let i = 0; i < 60; i++) {
-        const poll = await fetch(fileUri, {
-            headers: { 'x-goog-api-key': apiKey }
-        });
+        const poll = await fetch(`${fileUri}?key=${encodedKey}`);
         const d = await poll.json();
         const state = d.state || d.file?.state;
         if (state === 'ACTIVE') {
@@ -130,31 +136,43 @@ export default async (req: Request) => {
 
     if (!isReady) throw new Error("File timed out while becoming ACTIVE.");
 
-    const response = await ai.models.generateContent({
-      model: model || 'gemini-3-flash-preview',
-      contents: {
-        parts: [
-          { fileData: { fileUri: fileUri, mimeType: mimeType } },
-          { text: "Transcribe and summarize this meeting recording." }
-        ]
-      },
-      config: {
-        systemInstruction: "You are an expert meeting secretary. Analyze audio to detect the primary language. All output MUST be in the DETECTED LANGUAGE.",
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            transcription: { type: Type.STRING },
-            summary: { type: Type.STRING },
-            conclusions: { type: Type.ARRAY, items: { type: Type.STRING } },
-            actionItems: { type: Type.ARRAY, items: { type: Type.STRING } }
-          },
-          required: ["transcription", "summary", "conclusions", "actionItems"]
-        }
-      }
+    // 5. GENERATE CONTENT VIA RAW REST (matching the working pattern)
+    const generateUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model || 'gemini-3-flash-preview'}:generateContent?key=${encodedKey}`;
+    
+    const generateResp = await fetch(generateUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            contents: [{
+                parts: [
+                    { file_data: { file_uri: fileUri, mime_type: mimeType } },
+                    { text: "Transcribe and summarize this meeting recording. Return strict JSON." }
+                ]
+            }],
+            system_instruction: {
+                parts: [{ text: "You are an expert meeting secretary. Analyze audio to detect primary language. All output MUST be in the DETECTED LANGUAGE." }]
+            },
+            generation_config: {
+                response_mime_type: "application/json",
+                max_output_tokens: 8192
+            },
+            safety_settings: [
+                { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+                { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+                { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+                { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
+            ]
+        })
     });
 
-    const resultText = response.text || "{}";
+    if (!generateResp.ok) {
+        const genErr = await generateResp.text();
+        throw new Error(`Generation failed (${generateResp.status}): ${genErr}`);
+    }
+
+    const genData = await generateResp.json();
+    const resultText = genData.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+
     await resultStore.setJSON(jobId, { status: 'COMPLETED', result: resultText });
 
     if (profile && !profile.isPro) {
