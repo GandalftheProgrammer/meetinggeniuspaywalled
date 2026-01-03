@@ -121,11 +121,11 @@ const Header: React.FC<HeaderProps> = ({
                 {user ? (
                    <button 
                     onClick={onLogout}
-                    className="flex items-center gap-2 p-1.5 px-2 md:px-3 rounded-full bg-slate-100 text-slate-600 hover:bg-blue-50 hover:text-blue-600 transition-all border border-slate-200"
+                    className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-100 text-slate-600 hover:bg-blue-50 hover:text-blue-600 transition-all border border-slate-200 text-xs md:text-sm font-bold"
                     title={`Signed in as ${user.email}. Click to logout.`}
                    >
                      <UserIcon className="w-4 h-4" />
-                     <span className="hidden sm:inline text-xs font-bold">Profile</span>
+                     <span>Sign Out</span>
                    </button>
                 ) : (
                   <button 

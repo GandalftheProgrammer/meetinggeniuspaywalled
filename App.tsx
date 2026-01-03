@@ -32,6 +32,8 @@ const App: React.FC = () => {
   const [debugLogs, setDebugLogs] = useState<string[]>([]);
   const [sessionStartTime, setSessionStartTime] = useState<Date | null>(null);
 
+  const tokenClientRef = useRef<any>(null);
+
   const addLog = (msg: string) => {
     setDebugLogs(prev => [...prev, `${new Date().toLocaleTimeString('en-GB')} - ${msg}`]);
   };
@@ -42,28 +44,34 @@ const App: React.FC = () => {
     return `${day} ${months[date.getMonth()]} ${date.getFullYear()} at ${date.getHours().toString().padStart(2, '0')}h${date.getMinutes().toString().padStart(2, '0')}m`;
   };
 
+  const fetchUserProfile = async (email: string, uid: string) => {
+    try {
+      const res = await fetch('/.netlify/functions/get-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, uid })
+      });
+      const profile = await res.json();
+      setUser(profile);
+      addLog(`User profile synced: ${email}`);
+    } catch (err) {
+      console.error("Auth profile error:", err);
+      setError("Failed to load user profile. Check your internet connection.");
+    }
+  };
+
   useEffect(() => {
     const handleCredentialResponse = async (response: any) => {
       const decoded = JSON.parse(atob(response.credential.split('.')[1]));
       addLog(`Authenticated as ${decoded.email}`);
-      
-      try {
-        const res = await fetch('/.netlify/functions/get-user', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: decoded.email, uid: decoded.sub })
-        });
-        const profile = await res.json();
-        setUser(profile);
-      } catch (err) {
-        console.error("Auth profile error:", err);
-        setError("Failed to load user profile. Check your internet connection.");
-      }
+      fetchUserProfile(decoded.email, decoded.sub);
     };
 
-    const CLIENT_ID = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID;
+    const env = (import.meta as any).env;
+    const CLIENT_ID = env?.VITE_GOOGLE_CLIENT_ID;
 
     if ((window as any).google && CLIENT_ID) {
+      // 1. One Tap (Background check)
       google.accounts.id.initialize({
         client_id: CLIENT_ID,
         callback: handleCredentialResponse,
@@ -72,6 +80,24 @@ const App: React.FC = () => {
         itp_support: true
       });
       google.accounts.id.prompt();
+
+      // 2. OAuth2 Token Client (For manual clicks)
+      tokenClientRef.current = google.accounts.oauth2.initTokenClient({
+        client_id: CLIENT_ID,
+        scope: 'email profile openid',
+        callback: async (tokenResponse: any) => {
+          if (tokenResponse.access_token) {
+            try {
+              const info = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+                headers: { Authorization: `Bearer ${tokenResponse.access_token}` }
+              }).then(r => r.json());
+              fetchUserProfile(info.email, info.sub);
+            } catch (e) {
+              console.error("Token info error:", e);
+            }
+          }
+        },
+      });
     }
 
     const timer = setTimeout(() => {
@@ -109,7 +135,9 @@ const App: React.FC = () => {
   };
 
   const handleLogin = () => {
-    if ((window as any).google) {
+    if (tokenClientRef.current) {
+      tokenClientRef.current.requestAccessToken();
+    } else if ((window as any).google) {
       google.accounts.id.prompt();
     }
   };
