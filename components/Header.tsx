@@ -28,7 +28,7 @@ const Header: React.FC<HeaderProps> = ({
   onUpgrade,
   currentRecordingSeconds = 0
 }) => {
-  // Total used = stored usage + what's currently being recorded
+  // Usage is now strictly relative to the FREE_LIMIT_SECONDS constant
   const totalUsed = (user?.secondsUsed || 0) + currentRecordingSeconds;
   const remainingSeconds = Math.max(0, FREE_LIMIT_SECONDS - totalUsed);
   const remainingPercent = (remainingSeconds / FREE_LIMIT_SECONDS) * 100;

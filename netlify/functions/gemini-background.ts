@@ -15,7 +15,7 @@ export default async (req: Request) => {
     return new Response("API_KEY missing", { status: 500 });
   }
 
-  // Ensure Gemini SDK uses the key as named parameter as per guidelines
+  // Ensure Gemini SDK uses the key correctly
   const ai = new GoogleGenAI({ apiKey: apiKey });
   let jobId: string = "";
 
@@ -34,7 +34,6 @@ export default async (req: Request) => {
       throw new Error("User profile missing. Please log out and back in.");
     }
     
-    // Estimate duration: ~8KB/sec for common opus/compressed audio
     const estimatedDuration = Math.round(fileSize / 8000);
     
     if (profile && !profile.isPro && (profile.secondsUsed + estimatedDuration) > FREE_LIMIT_SECONDS) {
@@ -44,8 +43,10 @@ export default async (req: Request) => {
     const resultStore = getStore({ name: "meeting-results", consistency: "strong" });
     const uploadStore = getStore({ name: "meeting-uploads", consistency: "strong" });
 
-    // Resumable Handshake - appending key to initial request is standard
-    const handshakeUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${apiKey}`;
+    // Use encodeURIComponent to safeguard against keys with special characters
+    const encodedKey = encodeURIComponent(apiKey);
+    const handshakeUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodedKey}`;
+    
     const initResp = await fetch(handshakeUrl, {
         method: 'POST',
         headers: {
@@ -59,18 +60,16 @@ export default async (req: Request) => {
     });
 
     if (!initResp.ok) {
-      const err = await initResp.json();
-      throw new Error(`Gemini Handshake failed: ${JSON.stringify(err)}`);
+      const errText = await initResp.text();
+      throw new Error(`Gemini Handshake failed with status ${initResp.status}: ${errText}`);
     }
 
     let uploadUrl = initResp.headers.get('x-goog-upload-url') || "";
-    // If the returned uploadUrl doesn't have the key, add it for the subsequent requests
     if (!uploadUrl.includes('key=')) {
-        uploadUrl += (uploadUrl.includes('?') ? '&' : '?') + `key=${apiKey}`;
+        uploadUrl += (uploadUrl.includes('?') ? '&' : '?') + `key=${encodedKey}`;
     }
 
-    // Upload Loop
-    const GEMINI_CHUNK_SIZE = 4 * 1024 * 1024; // Smaller chunks for more reliability
+    const GEMINI_CHUNK_SIZE = 2 * 1024 * 1024; // Smaller for serverless stability
     let buffer = Buffer.alloc(0);
     let uploadOffset = 0;
 
@@ -80,7 +79,7 @@ export default async (req: Request) => {
         
         const chunkBuffer = Buffer.from(chunkBase64, 'base64');
         buffer = Buffer.concat([buffer, chunkBuffer]);
-        await uploadStore.delete(`${jobId}/${i}`); // Clean up as we go
+        await uploadStore.delete(`${jobId}/${i}`);
 
         while (buffer.length >= GEMINI_CHUNK_SIZE) {
             const chunkToSend = buffer.subarray(0, GEMINI_CHUNK_SIZE);
@@ -95,12 +94,11 @@ export default async (req: Request) => {
                 },
                 body: chunkToSend
             });
-            if (!up.ok) throw new Error("Chunk upload failed to Google Storage.");
+            if (!up.ok) throw new Error(`Chunk ${uploadOffset} upload failed.`);
             uploadOffset += GEMINI_CHUNK_SIZE;
         }
     }
 
-    // Finalize upload
     const finalResp = await fetch(uploadUrl, {
         method: 'POST',
         headers: {
@@ -116,10 +114,9 @@ export default async (req: Request) => {
     const fileResult = await finalResp.json();
     const fileUri = fileResult.file?.uri || fileResult.uri;
     
-    // Polling for file to become ACTIVE
     let isReady = false;
-    for (let i = 0; i < 30; i++) {
-        const poll = await fetch(`${fileUri}?key=${apiKey}`);
+    for (let i = 0; i < 60; i++) {
+        const poll = await fetch(`${fileUri}?key=${encodedKey}`);
         const d = await poll.json();
         const state = d.state || d.file?.state;
         if (state === 'ACTIVE') {
@@ -132,7 +129,6 @@ export default async (req: Request) => {
 
     if (!isReady) throw new Error("File timed out while becoming ACTIVE.");
 
-    // Final AI Generation
     const response = await ai.models.generateContent({
       model: model || 'gemini-3-flash-preview',
       contents: {
@@ -168,7 +164,6 @@ export default async (req: Request) => {
   } catch (err: any) {
     console.error(`Gemini Background Job ${jobId} Failed:`, err);
     const resultStore = getStore({ name: "meeting-results", consistency: "strong" });
-    // Stringify error object if it's a raw object from an API response
     const errMsg = typeof err === 'string' ? err : (err.message || JSON.stringify(err));
     await resultStore.setJSON(jobId, { status: 'ERROR', error: errMsg });
   }
