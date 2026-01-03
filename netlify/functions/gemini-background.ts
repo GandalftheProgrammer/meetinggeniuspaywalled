@@ -15,7 +15,6 @@ export default async (req: Request) => {
     return new Response("API_KEY missing", { status: 500 });
   }
 
-  // Ensure Gemini SDK uses the key correctly
   const ai = new GoogleGenAI({ apiKey: apiKey });
   let jobId: string = "";
 
@@ -43,13 +42,13 @@ export default async (req: Request) => {
     const resultStore = getStore({ name: "meeting-results", consistency: "strong" });
     const uploadStore = getStore({ name: "meeting-uploads", consistency: "strong" });
 
-    // Use encodeURIComponent to safeguard against keys with special characters
-    const encodedKey = encodeURIComponent(apiKey);
-    const handshakeUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodedKey}`;
+    // USE HEADERS INSTEAD OF QUERY PARAMS FOR 401 STABILITY
+    const handshakeUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files`;
     
     const initResp = await fetch(handshakeUrl, {
         method: 'POST',
         headers: {
+            'x-goog-api-key': apiKey,
             'X-Goog-Upload-Protocol': 'resumable',
             'X-Goog-Upload-Command': 'start',
             'X-Goog-Upload-Header-Content-Length': String(fileSize),
@@ -61,15 +60,13 @@ export default async (req: Request) => {
 
     if (!initResp.ok) {
       const errText = await initResp.text();
-      throw new Error(`Gemini Handshake failed with status ${initResp.status}: ${errText}`);
+      throw new Error(`Gemini Handshake failed (${initResp.status}): ${errText}`);
     }
 
-    let uploadUrl = initResp.headers.get('x-goog-upload-url') || "";
-    if (!uploadUrl.includes('key=')) {
-        uploadUrl += (uploadUrl.includes('?') ? '&' : '?') + `key=${encodedKey}`;
-    }
+    const uploadUrl = initResp.headers.get('x-goog-upload-url') || "";
+    if (!uploadUrl) throw new Error("No upload URL returned from Google.");
 
-    const GEMINI_CHUNK_SIZE = 2 * 1024 * 1024; // Smaller for serverless stability
+    const GEMINI_CHUNK_SIZE = 2 * 1024 * 1024; 
     let buffer = Buffer.alloc(0);
     let uploadOffset = 0;
 
@@ -88,13 +85,14 @@ export default async (req: Request) => {
             const up = await fetch(uploadUrl, {
                 method: 'POST',
                 headers: {
+                    'x-goog-api-key': apiKey,
                     'X-Goog-Upload-Command': 'upload',
                     'X-Goog-Upload-Offset': String(uploadOffset),
                     'Content-Type': 'application/octet-stream'
                 },
                 body: chunkToSend
             });
-            if (!up.ok) throw new Error(`Chunk ${uploadOffset} upload failed.`);
+            if (!up.ok) throw new Error(`Chunk upload failed with status ${up.status}`);
             uploadOffset += GEMINI_CHUNK_SIZE;
         }
     }
@@ -102,6 +100,7 @@ export default async (req: Request) => {
     const finalResp = await fetch(uploadUrl, {
         method: 'POST',
         headers: {
+            'x-goog-api-key': apiKey,
             'X-Goog-Upload-Command': 'upload, finalize',
             'X-Goog-Upload-Offset': String(uploadOffset),
             'Content-Type': 'application/octet-stream'
@@ -109,14 +108,16 @@ export default async (req: Request) => {
         body: buffer
     });
 
-    if (!finalResp.ok) throw new Error("File finalization failed.");
+    if (!finalResp.ok) throw new Error(`File finalization failed (${finalResp.status})`);
 
     const fileResult = await finalResp.json();
     const fileUri = fileResult.file?.uri || fileResult.uri;
     
     let isReady = false;
     for (let i = 0; i < 60; i++) {
-        const poll = await fetch(`${fileUri}?key=${encodedKey}`);
+        const poll = await fetch(fileUri, {
+            headers: { 'x-goog-api-key': apiKey }
+        });
         const d = await poll.json();
         const state = d.state || d.file?.state;
         if (state === 'ACTIVE') {
