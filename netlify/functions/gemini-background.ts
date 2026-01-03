@@ -40,36 +40,20 @@ export default async (req: Request) => {
 
     console.log(`[Background] Starting job ${jobId}. Chunks: ${totalChunks}. Size: ${fileSize}`);
 
-    // Results Store
     const resultStore = getStore({ name: "meeting-results", consistency: "strong" });
     const uploadStore = getStore({ name: "meeting-uploads", consistency: "strong" });
     const userStore = getStore({ name: "user-profiles", consistency: "strong" });
 
-    // Usage Limit Check
+    // Usage check
     const profile = uid ? await userStore.get(uid, { type: "json" }) as any : null;
-    const estimatedDuration = Math.round(fileSize / 8000); // Rough estimate for limit checking
-    
+    const estimatedDuration = Math.round(fileSize / 8000);
     if (profile && !profile.isPro && (profile.secondsUsed + estimatedDuration) > FREE_LIMIT_SECONDS) {
         throw new Error("Free monthly usage limit reached. Please upgrade.");
     }
 
     const updateStatus = async (msg: string) => { console.log(`[Background] ${msg}`); };
 
-    // --- 0. PRE-FLIGHT ---
-    await updateStatus("Checkpoint 0: Validating API Key...");
-    try {
-        const testUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodedKey}`;
-        const testResp = await fetch(testUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ contents: [{ parts: [{ text: "ping" }] }] })
-        });
-        if (!testResp.ok) throw new Error(`Test Failed (${testResp.status})`);
-    } catch (testErr: any) {
-        throw new Error(`API Key Rejected in Server Environment. Check restrictions.`);
-    }
-
-    // --- 1. INITIALIZE ---
+    // --- 1. INITIALIZE GEMINI UPLOAD ---
     await updateStatus("Checkpoint 1: Initializing Resumable Upload...");
     const handshakeUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodedKey}`;
     const initResp = await fetch(handshakeUrl, {
@@ -84,9 +68,9 @@ export default async (req: Request) => {
         body: JSON.stringify({ file: { display_name: `Meeting_${jobId}` } })
     });
 
-    if (!initResp.ok) throw new Error(`Init Handshake Failed: ${await initResp.text()}`);
+    if (!initResp.ok) throw new Error(`Handshake Failed: ${await initResp.text()}`);
     let uploadUrl = initResp.headers.get('x-goog-upload-url');
-    if (!uploadUrl) throw new Error("No upload URL returned");
+    if (!uploadUrl) throw new Error("No upload URL returned from Google");
     if (!uploadUrl.includes('key=')) {
         uploadUrl = `${uploadUrl}${uploadUrl.includes('?') ? '&' : '?'}key=${encodedKey}`;
     }
@@ -98,12 +82,13 @@ export default async (req: Request) => {
     let uploadOffset = 0;
 
     for (let i = 0; i < totalChunks; i++) {
-        const chunkBase64 = await uploadStore.get(`${jobId}/${i}`, { type: 'text' });
+        const chunkKey = `${jobId}/${i}`;
+        const chunkBase64 = await uploadStore.get(chunkKey, { type: 'text' });
         if (!chunkBase64) throw new Error(`Missing chunk ${i}`);
         
         const chunkBuffer = Buffer.from(chunkBase64, 'base64');
         buffer = Buffer.concat([buffer, chunkBuffer]);
-        await uploadStore.delete(`${jobId}/${i}`);
+        await uploadStore.delete(chunkKey);
 
         while (buffer.length >= GEMINI_CHUNK_SIZE) {
             const chunkToSend = buffer.subarray(0, GEMINI_CHUNK_SIZE);
@@ -118,7 +103,7 @@ export default async (req: Request) => {
                 },
                 body: chunkToSend
             });
-            if (!up.ok) throw new Error(`Chunk Upload Failed (${up.status})`);
+            if (!up.ok) throw new Error(`Chunk Upload Failed: ${up.status}`);
             uploadOffset += GEMINI_CHUNK_SIZE;
         }
     }
@@ -135,7 +120,7 @@ export default async (req: Request) => {
         },
         body: buffer
     });
-    if (!finalResp.ok) throw new Error(`Finalize Failed (${finalResp.status})`);
+    if (!finalResp.ok) throw new Error("Finalize Failed");
     const fileResult = await finalResp.json();
     const fileUri = fileResult.file?.uri || fileResult.uri;
 
@@ -143,7 +128,7 @@ export default async (req: Request) => {
     await updateStatus("Checkpoint 4: Waiting for ACTIVE state...");
     await waitForFileActive(fileUri, encodedKey);
 
-    // --- 5. GENERATE ---
+    // --- 5. GENERATE CONTENT (EXACT REST STRATEGY) ---
     await updateStatus("Checkpoint 5: Generating Content...");
     const modelsToTry = FALLBACK_CHAINS[model] || [model];
     let resultText = "";
@@ -162,16 +147,14 @@ export default async (req: Request) => {
 
     if (!generationSuccess) throw new Error(`Generation failed with all fallbacks.`);
 
-    // Save Result
     await resultStore.setJSON(jobId, { status: 'COMPLETED', result: resultText });
 
-    // Update Usage
     if (profile && !profile.isPro) {
       profile.secondsUsed += estimatedDuration;
       await userStore.setJSON(uid, profile);
     }
 
-    console.log(`[Background] Job ${jobId} Completed.`);
+    console.log(`[Background] Job ${jobId} Completed Successfully.`);
 
   } catch (err: any) {
     console.error(`[Background] FATAL ERROR: ${err.message}`);
@@ -188,11 +171,11 @@ async function waitForFileActive(fileUri: string, encodedKey: string) {
             const d = await r.json();
             const state = d.state || d.file?.state;
             if (state === 'ACTIVE') return;
-            if (state === 'FAILED') throw new Error(`File processing failed.`);
+            if (state === 'FAILED') throw new Error("File processing failed state: FAILED");
         }
         await new Promise(r => setTimeout(r, 2000));
     }
-    throw new Error("Polling timeout");
+    throw new Error("Timeout waiting for ACTIVE");
 }
 
 async function generateContentREST(fileUri: string, mimeType: string, mode: string, model: string, encodedKey: string): Promise<string> {
@@ -222,14 +205,21 @@ async function generateContentREST(fileUri: string, mimeType: string, mode: stri
     else taskInstruction = "Transcribe the audio verbatim AND create detailed structured notes in the spoken language.";
 
     const payload = {
-        contents: [{
-            parts: [
-                { file_data: { file_uri: fileUri, mime_type: mimeType } },
-                { text: taskInstruction + "\n\nReturn strict JSON." }
-            ]
-        }],
-        system_instruction: { parts: [{ text: systemInstruction }] },
-        generation_config: { response_mime_type: "application/json", max_output_tokens: 8192 },
+        contents: [
+            {
+                parts: [
+                    { file_data: { file_uri: fileUri, mime_type: mimeType } },
+                    { text: taskInstruction + "\n\nReturn strict JSON." }
+                ]
+            }
+        ],
+        system_instruction: {
+            parts: [{ text: systemInstruction }]
+        },
+        generation_config: {
+            response_mime_type: "application/json",
+            max_output_tokens: 8192
+        },
         safety_settings: [
             { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
             { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
@@ -238,22 +228,32 @@ async function generateContentREST(fileUri: string, mimeType: string, mode: stri
         ]
     };
 
-    for (let attempts = 0; attempts <= 2; attempts++) {
+    let attempts = 0;
+    while (attempts <= 2) {
         try {
-            const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+            const resp = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
             if (resp.ok) {
                 const data = await resp.json();
                 return data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
             }
+
             if (resp.status === 503 || resp.status === 429) {
-                await new Promise(r => setTimeout(r, 1000 * (attempts + 1)));
+                attempts++;
+                await new Promise(r => setTimeout(r, 1000 * attempts));
                 continue;
             }
+
             throw new Error(`Generation Failed (${resp.status})`);
         } catch (e: any) {
             if (attempts === 2) throw e;
+            attempts++;
             await new Promise(r => setTimeout(r, 1000));
         }
     }
-    throw new Error("Unexpected end");
+    throw new Error("Generation loop unexpected end");
 }
