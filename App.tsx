@@ -68,21 +68,26 @@ const App: React.FC = () => {
         setUser(profile);
       } catch (err) {
         console.error("Auth profile error:", err);
+        setError("Failed to load user profile. Please try signing in again.");
       }
     };
 
+    const CLIENT_ID = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID;
+
     // Fix: Cast window to any to access the global 'google' object and resolve TS error
-    if ((window as any).google) {
+    if ((window as any).google && CLIENT_ID) {
       google.accounts.id.initialize({
-        client_id: (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID || 'YOUR_GOOGLE_CLIENT_ID',
+        client_id: CLIENT_ID,
         callback: handleCredentialResponse,
-        // CRITICAL FIX: Disable FedCM to resolve 'identity-credentials-get' NotAllowedError
-        // This is often required in iframed or restricted environments like Netlify preview
         use_fedcm_for_prompt: false,
         auto_select: false,
         itp_support: true
       });
       google.accounts.id.prompt(); // Display One Tap
+    } else if (!(window as any).google) {
+      console.warn("Google identity services not loaded.");
+    } else if (!CLIENT_ID) {
+      console.error("VITE_GOOGLE_CLIENT_ID is not configured in environment variables.");
     }
 
     const timer = setTimeout(() => {
@@ -110,22 +115,24 @@ const App: React.FC = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: user.email, uid: user.uid })
       });
-      const { url } = await res.json();
-      window.location.href = url;
+      const data = await res.json();
+      if (data.url) {
+        window.location.href = data.url;
+      } else {
+        throw new Error(data.error || "Stripe session creation failed.");
+      }
     } catch (err) {
       addLog("Stripe redirect failed.");
+      setError("Payment setup failed. Please check your internet connection.");
     }
   };
 
   const handleLogin = () => {
-    // Fix: Cast window to any to access the global 'google' object and resolve TS error
     if ((window as any).google) {
-      // Re-trigger the prompt to ensure user can sign in manually if One Tap fails or is closed
       google.accounts.id.prompt((notification: any) => {
         if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
-          // If the prompt is blocked or skipped, we could potentially show a button 
-          // or use the standard sign-in button if we had one.
           console.log("One Tap skipped or not displayed", notification.getNotDisplayedReason());
+          // Handle cases where One Tap might be blocked or dismissed
         }
       });
     }
@@ -178,6 +185,7 @@ const App: React.FC = () => {
       setSessionStartTime(new Date());
       setAppState(AppState.RECORDING);
       setRecoverableSession(null);
+      setError(null);
     } else {
        if (appState === AppState.RECORDING) {
          setAppState(AppState.PAUSED);
@@ -194,6 +202,7 @@ const App: React.FC = () => {
     setTitle(finalTitle);
 
     setAppState(AppState.PROCESSING);
+    setError(null);
 
     try {
       addLog("Starting analysis...");
@@ -204,9 +213,10 @@ const App: React.FC = () => {
 
       deleteSessionData(sessionIdRef.current).catch(() => {});
       if (isDriveConnected) autoSyncToDrive(newData, finalTitle, combinedBlob);
-    } catch (apiError) {
-      addLog(`Error: ${apiError instanceof Error ? apiError.message : 'Unknown'}`);
-      setError("Analysis failed.");
+    } catch (apiError: any) {
+      const errMsg = apiError instanceof Error ? apiError.message : 'Unknown pipeline error';
+      addLog(`CRITICAL ERROR: ${errMsg}`);
+      setError(`Analysis failed: ${errMsg}`);
       setAppState(AppState.PAUSED); 
     }
   };
@@ -255,7 +265,15 @@ const App: React.FC = () => {
         onUpgrade={handleUpgrade}
       />
       <main className="flex-1 w-full max-w-7xl mx-auto px-4 py-8 md:py-12">
-        {error && <div className="max-w-md mx-auto mb-8 p-4 bg-red-50 border border-red-100 text-red-600 rounded-xl text-center text-sm font-medium">{error}</div>}
+        {error && (
+          <div className="max-w-md mx-auto mb-8 p-4 bg-red-50 border border-red-200 text-red-700 rounded-xl text-center text-sm font-medium shadow-sm animate-in fade-in zoom-in duration-300">
+            <div className="flex items-center justify-center gap-2 mb-1">
+              <AlertCircle className="w-4 h-4" />
+              <span className="font-bold">Error</span>
+            </div>
+            {error}
+          </div>
+        )}
 
         {appState !== AppState.COMPLETED && (
           <div className="flex flex-col items-center space-y-8 animate-in fade-in duration-500">

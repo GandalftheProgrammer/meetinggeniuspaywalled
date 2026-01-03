@@ -3,13 +3,19 @@ import { getStore } from "@netlify/blobs";
 import { Buffer } from "node:buffer";
 import { GoogleGenAI, Type } from "@google/genai";
 
-const FREE_LIMIT_SECONDS = 5; // Test limit
+// 5 hours in seconds
+const FREE_LIMIT_SECONDS = 18000;
 
 export default async (req: Request) => {
   if (req.method !== 'POST') return new Response("OK");
 
-  // Fix: Use the official Gemini SDK for generation
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = process.env.API_KEY;
+  if (!apiKey) {
+    console.error("Gemini Background: API_KEY is missing in environment.");
+    return new Response("API_KEY missing", { status: 500 });
+  }
+
+  const ai = new GoogleGenAI({ apiKey });
   let jobId: string = "";
 
   try {
@@ -17,26 +23,29 @@ export default async (req: Request) => {
     const { totalChunks, mimeType, mode, model, fileSize, uid } = payload;
     jobId = payload.jobId;
 
-    if (!jobId) return;
+    if (!jobId) return new Response("Missing jobId", { status: 400 });
 
     // --- USAGE CHECK ---
     const userStore = getStore({ name: "user-profiles", consistency: "strong" });
-    const profile = uid ? await userStore.get(uid, { type: "json" }) : null;
+    const profile = uid ? await userStore.get(uid, { type: "json" }) as any : null;
 
-    if (!profile && uid) throw new Error("User account required for processing.");
+    if (!profile && uid) {
+      console.error(`Gemini Background: Profile not found for UID: ${uid}`);
+      throw new Error("User account profile not found. Please logout and login again.");
+    }
     
-    // Estimate duration from fileSize (roughly 64kbps audio)
-    const estimatedDuration = Math.round(fileSize / (64000 / 8));
+    // Estimate duration from fileSize (roughly 64kbps audio = 8KB/s)
+    const estimatedDuration = Math.round(fileSize / 8000);
     
-    if (profile && !profile.isPro && (profile.secondsUsed + estimatedDuration) > (FREE_LIMIT_SECONDS + 10)) {
-        throw new Error("Free usage limit reached. Please upgrade to Pro.");
+    if (profile && !profile.isPro && (profile.secondsUsed + estimatedDuration) > FREE_LIMIT_SECONDS) {
+        throw new Error("Free monthly usage limit reached. Please upgrade to Pro.");
     }
 
     const resultStore = getStore({ name: "meeting-results", consistency: "strong" });
     const uploadStore = getStore({ name: "meeting-uploads", consistency: "strong" });
 
     // Handshake
-    const encodedKey = encodeURIComponent(process.env.API_KEY || "");
+    const encodedKey = encodeURIComponent(apiKey);
     const handshakeUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodedKey}`;
     const initResp = await fetch(handshakeUrl, {
         method: 'POST',
@@ -49,6 +58,11 @@ export default async (req: Request) => {
         },
         body: JSON.stringify({ file: { display_name: `Meeting_${jobId}` } })
     });
+
+    if (!initResp.ok) {
+      const err = await initResp.text();
+      throw new Error(`Gemini File Handshake failed: ${err}`);
+    }
 
     let uploadUrl = initResp.headers.get('x-goog-upload-url') || "";
     if (!uploadUrl.includes('key=')) uploadUrl += (uploadUrl.includes('?') ? '&' : '?') + `key=${encodedKey}`;
@@ -94,6 +108,11 @@ export default async (req: Request) => {
         body: buffer
     });
 
+    if (!finalResp.ok) {
+      const err = await finalResp.text();
+      throw new Error(`Gemini File Finalize failed: ${err}`);
+    }
+
     const fileResult = await finalResp.json();
     const fileUri = fileResult.file?.uri || fileResult.uri;
     
@@ -102,7 +121,9 @@ export default async (req: Request) => {
     while (activeAttempts < 60) {
         const poll = await fetch(`${fileUri}?key=${encodedKey}`);
         const d = await poll.json();
-        if (d.state === 'ACTIVE' || d.file?.state === 'ACTIVE') break;
+        const state = d.state || d.file?.state;
+        if (state === 'ACTIVE') break;
+        if (state === 'FAILED') throw new Error("Gemini file processing failed (state: FAILED).");
         await new Promise(r => setTimeout(r, 2000));
         activeAttempts++;
     }
@@ -144,7 +165,10 @@ export default async (req: Request) => {
     }
 
   } catch (err: any) {
+    console.error(`Gemini Background Job ${jobId} Failed:`, err);
     const resultStore = getStore({ name: "meeting-results", consistency: "strong" });
     await resultStore.setJSON(jobId, { status: 'ERROR', error: err.message });
   }
+  
+  return new Response("Processing started");
 };

@@ -1,7 +1,7 @@
 
 import React from 'react';
-import { CheckCircle2, Bot, XCircle, ChevronDown, Crown, LogOut, User as UserIcon } from 'lucide-react';
-import { GeminiModel, UserProfile } from '../types';
+import { CheckCircle2, Bot, ChevronDown, Crown, LogOut, User as UserIcon } from 'lucide-react';
+import { GeminiModel, UserProfile, FREE_LIMIT_SECONDS } from '../types';
 
 interface HeaderProps {
   isDriveConnected: boolean;
@@ -26,9 +26,17 @@ const Header: React.FC<HeaderProps> = ({
   onLogout,
   onUpgrade
 }) => {
-  const FREE_LIMIT_SECONDS = 5; // Test limit
-  const remainingPercent = user ? Math.max(0, ((FREE_LIMIT_SECONDS - user.secondsUsed) / FREE_LIMIT_SECONDS) * 100) : 100;
+  const remainingSeconds = user ? Math.max(0, FREE_LIMIT_SECONDS - user.secondsUsed) : FREE_LIMIT_SECONDS;
+  const remainingPercent = (remainingSeconds / FREE_LIMIT_SECONDS) * 100;
   
+  // Format seconds to readable hours/minutes
+  const formatRemaining = (s: number) => {
+    const hours = Math.floor(s / 3600);
+    const minutes = Math.floor((s % 3600) / 60);
+    if (hours > 0) return `${hours}h ${minutes}m left`;
+    return `${minutes}m left`;
+  };
+
   return (
     <header className="w-full py-4 md:py-6 px-4 md:px-8 bg-white border-b border-slate-200 sticky top-0 z-50">
       <div className="max-w-5xl mx-auto flex flex-wrap items-center justify-between gap-3">
@@ -51,7 +59,7 @@ const Header: React.FC<HeaderProps> = ({
                     Pro Plan
                   </div>
                 ) : (
-                  <div className="flex items-center gap-2 min-w-[100px]">
+                  <div className="flex items-center gap-2 min-w-[120px]">
                     <div className="flex-1 h-1.5 bg-slate-200 rounded-full overflow-hidden w-16">
                       <div 
                         className="h-full bg-blue-500 transition-all duration-500" 
@@ -59,7 +67,7 @@ const Header: React.FC<HeaderProps> = ({
                       />
                     </div>
                     <span className="text-[10px] font-bold text-slate-500 whitespace-nowrap">
-                      {Math.max(0, FREE_LIMIT_SECONDS - user.secondsUsed)}s left
+                      {formatRemaining(remainingSeconds)}
                     </span>
                   </div>
                 )}
@@ -76,7 +84,7 @@ const Header: React.FC<HeaderProps> = ({
 
             <div className="flex items-center gap-2">
                 <div className="flex relative group shrink-0">
-                    <div className="flex items-center gap-2 text-xs md:text-sm font-medium text-slate-600 bg-slate-50 px-2 md:px-3 py-1.5 rounded-full border border-slate-200 hover:border-slate-300 transition-colors">
+                    <div className="flex items-center gap-2 text-xs md:text-sm font-medium text-slate-600 bg-white px-2 md:px-3 py-1.5 rounded-full border border-slate-200 hover:border-slate-300 transition-colors shadow-sm">
                         <span className="hidden xs:inline">Model:</span>
                         <select 
                             value={selectedModel}
@@ -108,10 +116,11 @@ const Header: React.FC<HeaderProps> = ({
                 {user ? (
                    <button 
                     onClick={onLogout}
-                    className="p-1.5 rounded-full bg-slate-100 text-slate-600 hover:bg-red-50 hover:text-red-600 transition-all border border-slate-200"
+                    className="flex items-center gap-2 p-1.5 px-2 md:px-3 rounded-full bg-slate-100 text-slate-600 hover:bg-red-50 hover:text-red-600 transition-all border border-slate-200"
                     title={`Signed in as ${user.email}`}
                    >
-                     <LogOut className="w-4 h-4" />
+                     <UserIcon className="w-4 h-4" />
+                     <span className="hidden sm:inline text-xs font-bold">Profile</span>
                    </button>
                 ) : (
                   <button 

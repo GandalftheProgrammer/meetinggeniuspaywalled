@@ -1,8 +1,8 @@
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { Mic, Square, Loader2, MonitorPlay, Trash2, Circle, FileAudio, ListChecks, FileText, CheckCircle, Upload, AlertTriangle, Crown, Lock } from 'lucide-react';
+import { Square, Loader2, Trash2, Circle, ListChecks, FileText, Upload, AlertTriangle, Crown, Lock } from 'lucide-react';
 import AudioVisualizer from './AudioVisualizer';
-import { AppState, ProcessingMode, UserProfile } from '../types';
+import { AppState, ProcessingMode, UserProfile, FREE_LIMIT_SECONDS } from '../types';
 
 const SILENT_AUDIO_URI = 'data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4LjI5LjEwMAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAAEAAABIADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMD//////////////////////////////////wAAADFMYXZjNTguNTQuAAAAAAAAAAAAAAAAJAAAAAAAAAAAASAAxIirAAAA//OEAAAAAAAAAAAAAAAAAAAAAAA';
 
@@ -49,8 +49,6 @@ const Recorder: React.FC<RecorderProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const silentAudioRef = useRef<HTMLAudioElement | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
-
-  const FREE_LIMIT_SECONDS = 5; // Test limit
 
   useEffect(() => {
     if (!navigator.mediaDevices?.getDisplayMedia || /Android|iPhone|iPad/i.test(navigator.userAgent)) {
@@ -215,7 +213,7 @@ const Recorder: React.FC<RecorderProps> = ({
           </div>
           <h3 className="text-lg font-bold text-slate-800 mb-2">Sign in to start</h3>
           <p className="text-slate-500 text-sm mb-6 max-w-[200px]">
-            Please sign in with Google to use your free 5 hours of note taking.
+            Please sign in with Google to use your free 5 hours of monthly note taking.
           </p>
           <button 
             onClick={onLogin}
@@ -232,9 +230,9 @@ const Recorder: React.FC<RecorderProps> = ({
           <div className="p-4 bg-orange-50 rounded-full mb-4">
             <AlertTriangle className="w-10 h-10 text-orange-500" />
           </div>
-          <h3 className="text-xl font-bold text-slate-800 mb-2">Free Limit Reached</h3>
+          <h3 className="text-xl font-bold text-slate-800 mb-2">Free Monthly Limit Reached</h3>
           <p className="text-slate-600 text-sm mb-6 max-w-xs">
-            You've used your free allowance. Your recording has been saved up to this point. Upgrade for unlimited use!
+            You've used your free monthly allowance. Your current recording has been saved. Upgrade for unlimited use!
           </p>
           <div className="flex flex-col gap-3 w-full">
             <button 
