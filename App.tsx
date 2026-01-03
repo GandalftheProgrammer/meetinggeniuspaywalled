@@ -31,7 +31,6 @@ const App: React.FC = () => {
   const [isDriveConnected, setIsDriveConnected] = useState(false);
   const [debugLogs, setDebugLogs] = useState<string[]>([]);
   const [sessionStartTime, setSessionStartTime] = useState<Date | null>(null);
-  const isAuthInitializedRef = useRef(false);
 
   const addLog = (msg: string) => {
     setDebugLogs(prev => [...prev, `${new Date().toLocaleTimeString('en-GB')} - ${msg}`]);
@@ -43,61 +42,37 @@ const App: React.FC = () => {
     return `${day} ${months[date.getMonth()]} ${date.getFullYear()} at ${date.getHours().toString().padStart(2, '0')}h${date.getMinutes().toString().padStart(2, '0')}m`;
   };
 
-  const handleCredentialResponse = async (response: any) => {
-    const decoded = JSON.parse(atob(response.credential.split('.')[1]));
-    addLog(`Authenticated as ${decoded.email}`);
-    
-    try {
-      const res = await fetch('/.netlify/functions/get-user', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: decoded.email, uid: decoded.sub })
-      });
-      const profile = await res.json();
-      setUser(profile);
-    } catch (err) {
-      console.error("Auth profile error:", err);
-      setError("Failed to load user profile. Check your internet connection.");
-    }
-  };
+  useEffect(() => {
+    const handleCredentialResponse = async (response: any) => {
+      const decoded = JSON.parse(atob(response.credential.split('.')[1]));
+      addLog(`Authenticated as ${decoded.email}`);
+      
+      try {
+        const res = await fetch('/.netlify/functions/get-user', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: decoded.email, uid: decoded.sub })
+        });
+        const profile = await res.json();
+        setUser(profile);
+      } catch (err) {
+        console.error("Auth profile error:", err);
+        setError("Failed to load user profile. Check your internet connection.");
+      }
+    };
 
-  const initAuth = () => {
-    if (isAuthInitializedRef.current) return true;
-    
     const CLIENT_ID = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID;
-    if (!(window as any).google) {
-      return false;
-    }
-    
-    if (!CLIENT_ID) {
-      console.error("VITE_GOOGLE_CLIENT_ID is missing in environment.");
-      return false;
-    }
 
-    try {
+    if ((window as any).google && CLIENT_ID) {
       google.accounts.id.initialize({
         client_id: CLIENT_ID,
         callback: handleCredentialResponse,
-        use_fedcm_for_prompt: true,
+        use_fedcm_for_prompt: false,
         auto_select: false,
         itp_support: true
       });
-      isAuthInitializedRef.current = true;
-      return true;
-    } catch (e) {
-      console.error("Failed to initialize Google Auth", e);
-      return false;
+      google.accounts.id.prompt();
     }
-  };
-
-  useEffect(() => {
-    // Attempt initialization periodically until script loads
-    const interval = setInterval(() => {
-      if (initAuth()) {
-        clearInterval(interval);
-        google.accounts.id.prompt();
-      }
-    }, 1000);
 
     const timer = setTimeout(() => {
       initDrive((token) => {
@@ -109,11 +84,7 @@ const App: React.FC = () => {
           }
       });
     }, 500);
-
-    return () => {
-      clearInterval(interval);
-      clearTimeout(timer);
-    };
+    return () => clearTimeout(timer);
   }, []);
 
   const handleUpgrade = async () => {
@@ -138,23 +109,9 @@ const App: React.FC = () => {
   };
 
   const handleLogin = () => {
-    if (!initAuth()) {
-      alert("Inlogservice is nog aan het laden. Een moment geduld of vernieuw de pagina.");
-      return;
+    if ((window as any).google) {
+      google.accounts.id.prompt();
     }
-    
-    addLog("Inlogvenster opvragen...");
-    google.accounts.id.prompt((notification: any) => {
-      if (notification.isNotDisplayed()) {
-        const reason = notification.getNotDisplayedReason();
-        addLog(`Inlogvenster niet getoond: ${reason}`);
-        if (reason === 'opt_out_or_no_session_cookie') {
-          alert("Zorg ervoor dat je bent ingelogd op je Google-account in deze browser.");
-        } else {
-          alert("Het inlogvenster kon niet worden geopend. Dit gebeurt soms als je het venster kortgeleden hebt weggeklikt. Probeer het over een paar minuten opnieuw of open de site in een incognito-venster.");
-        }
-      }
-    });
   };
 
   const handleLogout = () => {
