@@ -50,7 +50,7 @@ export const processMeetingAudio = async (
     const triggerResp = await fetch('/.netlify/functions/gemini-background', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jobId, totalChunks: chunkIndex, mimeType, mode: 'ALL', model, fileSize: totalBytes, uid })
+        body: JSON.stringify({ jobId, totalChunks: chunkIndex, mimeType, mode, model, fileSize: totalBytes, uid })
     });
 
     if (!triggerResp.ok) throw new Error("Worker handshake failed.");
@@ -103,18 +103,22 @@ function blobToBase64(blob: Blob): Promise<string> {
 }
 
 function parseResponse(jsonText: string, mode: ProcessingMode): MeetingData {
-    // Remove potential markdown fences
     const cleanText = jsonText.replace(/```json/g, '').replace(/```/g, '').trim();
     try {
         const rawData = JSON.parse(cleanText);
         return {
-            transcription: rawData.transcription || "No transcript returned.",
-            summary: rawData.summary || "No summary returned.",
+            transcription: rawData.transcription || (mode === 'NOTES_ONLY' ? "" : "No transcript returned."),
+            summary: rawData.summary || (mode === 'TRANSCRIPT_ONLY' ? "" : "No summary returned."),
             conclusions: Array.isArray(rawData.conclusions) ? rawData.conclusions : [],
             actionItems: Array.isArray(rawData.actionItems) ? rawData.actionItems : []
         };
     } catch (e) {
         console.error("Parse failed for:", cleanText);
-        return { transcription: "Error parsing transcript.", summary: "Data corrupted. Try again.", conclusions: [], actionItems: [] };
+        return { 
+          transcription: "Error parsing result.", 
+          summary: "The AI response could not be parsed as JSON. Please try again.", 
+          conclusions: [], 
+          actionItems: [] 
+        };
     }
 }
