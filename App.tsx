@@ -42,36 +42,63 @@ const App: React.FC = () => {
     return `${day} ${months[date.getMonth()]} ${date.getFullYear()} at ${date.getHours().toString().padStart(2, '0')}h${date.getMinutes().toString().padStart(2, '0')}m`;
   };
 
-  useEffect(() => {
-    const handleCredentialResponse = async (response: any) => {
+  const handleCredentialResponse = async (response: any) => {
+    try {
       const decoded = JSON.parse(atob(response.credential.split('.')[1]));
       addLog(`Authenticated as ${decoded.email}`);
       
-      try {
-        const res = await fetch('/.netlify/functions/get-user', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: decoded.email, uid: decoded.sub })
+      const res = await fetch('/.netlify/functions/get-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: decoded.email, uid: decoded.sub })
+      });
+      const profile = await res.json();
+      setUser(profile);
+    } catch (err) {
+      console.error("Auth profile error:", err);
+      setError("Failed to load user profile.");
+    }
+  };
+
+  useEffect(() => {
+    const initAuth = () => {
+      // Access client ID via import.meta.env
+      // Fix: Cast import.meta to any to avoid TypeScript error 'env' does not exist on type 'ImportMeta'
+      const CLIENT_ID = (import.meta as any).env.VITE_GOOGLE_CLIENT_ID;
+      
+      if ((window as any).google && CLIENT_ID) {
+        google.accounts.id.initialize({
+          client_id: CLIENT_ID,
+          callback: handleCredentialResponse,
+          auto_select: true,
+          itp_support: true
         });
-        const profile = await res.json();
-        setUser(profile);
-      } catch (err) {
-        console.error("Auth profile error:", err);
-        setError("Failed to load user profile. Check your internet connection.");
+        
+        // Show One Tap prompt
+        google.accounts.id.prompt();
+        
+        // Render the standard button if the container exists
+        const btnContainer = document.getElementById('google-signin-btn');
+        if (btnContainer) {
+          google.accounts.id.renderButton(btnContainer, {
+            theme: 'outline',
+            size: 'large',
+            shape: 'pill'
+          });
+        }
+      } else if (!CLIENT_ID) {
+        console.warn("VITE_GOOGLE_CLIENT_ID not found. Ensure it is set in Netlify.");
       }
     };
 
-    const CLIENT_ID = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID;
-
-    if ((window as any).google && CLIENT_ID) {
-      google.accounts.id.initialize({
-        client_id: CLIENT_ID,
-        callback: handleCredentialResponse,
-        use_fedcm_for_prompt: false,
-        auto_select: false,
-        itp_support: true
-      });
-      google.accounts.id.prompt();
+    // Wait for the script to be ready
+    if ((window as any).google) {
+      initAuth();
+    } else {
+      const script = document.querySelector('script[src*="gsi/client"]');
+      if (script) {
+        script.addEventListener('load', initAuth);
+      }
     }
 
     const timer = setTimeout(() => {
@@ -84,6 +111,7 @@ const App: React.FC = () => {
           }
       });
     }, 500);
+
     return () => clearTimeout(timer);
   }, []);
 
@@ -111,6 +139,8 @@ const App: React.FC = () => {
   const handleLogin = () => {
     if ((window as any).google) {
       google.accounts.id.prompt();
+    } else {
+      alert("Inlogservice wordt geladen, een moment geduld...");
     }
   };
 

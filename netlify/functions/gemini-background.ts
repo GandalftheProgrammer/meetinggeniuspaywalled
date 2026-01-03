@@ -1,18 +1,20 @@
 
 import { getStore } from "@netlify/blobs";
 import { Buffer } from "node:buffer";
+// Always use import {GoogleGenAI} from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
 
-// 5 hours in seconds
+// 5 hours in seconds (5 * 60 * 60 = 18000)
 const FREE_LIMIT_SECONDS = 18000;
 
-// Define smart fallback sequences for models to handle 503 Overloads
+// Define smart fallback sequences for models using recommended names from guidelines
 const FALLBACK_CHAINS: Record<string, string[]> = {
-    'gemini-3-pro-preview': ['gemini-3-pro-preview', 'gemini-2.0-flash', 'gemini-2.5-flash'],
-    'gemini-2.5-pro': ['gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-2.5-flash'],
-    'gemini-2.5-flash': ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash-lite'],
-    'gemini-2.5-flash-lite': ['gemini-2.5-flash-lite', 'gemini-2.0-flash-lite', 'gemini-2.5-flash'],
-    'gemini-2.0-flash': ['gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
-    'gemini-2.0-flash-lite': ['gemini-2.0-flash-lite', 'gemini-2.5-flash-lite', 'gemini-2.0-flash']
+    'gemini-3-pro-preview': ['gemini-3-pro-preview', 'gemini-flash-latest'],
+    'gemini-3-flash-preview': ['gemini-3-flash-preview', 'gemini-flash-latest'],
+    'gemini-2.5-pro': ['gemini-2.5-pro', 'gemini-flash-latest'],
+    'gemini-2.5-flash': ['gemini-2.5-flash', 'gemini-flash-latest'],
+    'gemini-flash-lite-latest': ['gemini-flash-lite-latest', 'gemini-flash-latest'],
+    'gemini-flash-latest': ['gemini-flash-latest', 'gemini-flash-lite-latest']
 };
 
 export default async (req: Request) => {
@@ -54,6 +56,7 @@ export default async (req: Request) => {
     const updateStatus = async (msg: string) => { console.log(`[Background] ${msg}`); };
 
     // --- 1. INITIALIZE GEMINI UPLOAD ---
+    // Resumable upload is best for large media processing in background workers
     await updateStatus("Checkpoint 1: Initializing Resumable Upload...");
     const handshakeUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodedKey}`;
     const initResp = await fetch(handshakeUrl, {
@@ -128,7 +131,7 @@ export default async (req: Request) => {
     await updateStatus("Checkpoint 4: Waiting for ACTIVE state...");
     await waitForFileActive(fileUri, encodedKey);
 
-    // --- 5. GENERATE CONTENT (EXACT REST STRATEGY) ---
+    // --- 5. GENERATE CONTENT (SDK REFACTOR) ---
     await updateStatus("Checkpoint 5: Generating Content...");
     const modelsToTry = FALLBACK_CHAINS[model] || [model];
     let resultText = "";
@@ -136,10 +139,12 @@ export default async (req: Request) => {
 
     for (const currentModel of modelsToTry) {
         try {
-            resultText = await generateContentREST(fileUri, mimeType, mode, currentModel, encodedKey);
+            // Refactor: Use @google/genai SDK for generation logic as per instructions
+            resultText = await generateContentSDK(fileUri, mimeType, mode, currentModel, apiKey);
             generationSuccess = true;
             break;
         } catch (e: any) {
+            console.warn(`[Background] Model ${currentModel} failed: ${e.message}`);
             if (e.message.includes('503') || e.message.includes('429')) continue;
             throw e;
         }
@@ -178,8 +183,9 @@ async function waitForFileActive(fileUri: string, encodedKey: string) {
     throw new Error("Timeout waiting for ACTIVE");
 }
 
-async function generateContentREST(fileUri: string, mimeType: string, mode: string, model: string, encodedKey: string): Promise<string> {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodedKey}`;
+// SDK implementation of generateContent following guideline rules
+async function generateContentSDK(fileUri: string, mimeType: string, mode: string, model: string, apiKey: string): Promise<string> {
+    const ai = new GoogleGenAI({ apiKey });
 
     const systemInstruction = `You are an expert meeting secretary.
     1. CRITICAL: Analyze the audio to detect the primary spoken language.
@@ -204,56 +210,23 @@ async function generateContentREST(fileUri: string, mimeType: string, mode: stri
     else if (mode === 'NOTES_ONLY') taskInstruction = "Create detailed structured notes (summary, conclusions, actionItems) in the spoken language. Leave transcription empty.";
     else taskInstruction = "Transcribe the audio verbatim AND create detailed structured notes in the spoken language.";
 
-    const payload = {
+    const response = await ai.models.generateContent({
+        model: model,
         contents: [
             {
                 parts: [
-                    { file_data: { file_uri: fileUri, mime_type: mimeType } },
+                    { fileData: { fileUri: fileUri, mimeType: mimeType } },
                     { text: taskInstruction + "\n\nReturn strict JSON." }
                 ]
             }
         ],
-        system_instruction: {
-            parts: [{ text: systemInstruction }]
-        },
-        generation_config: {
-            response_mime_type: "application/json",
-            max_output_tokens: 8192
-        },
-        safety_settings: [
-            { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
-            { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
-            { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
-            { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
-        ]
-    };
-
-    let attempts = 0;
-    while (attempts <= 2) {
-        try {
-            const resp = await fetch(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-
-            if (resp.ok) {
-                const data = await resp.json();
-                return data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
-            }
-
-            if (resp.status === 503 || resp.status === 429) {
-                attempts++;
-                await new Promise(r => setTimeout(r, 1000 * attempts));
-                continue;
-            }
-
-            throw new Error(`Generation Failed (${resp.status})`);
-        } catch (e: any) {
-            if (attempts === 2) throw e;
-            attempts++;
-            await new Promise(r => setTimeout(r, 1000));
+        config: {
+            systemInstruction: systemInstruction,
+            responseMimeType: "application/json",
+            maxOutputTokens: 8192
         }
-    }
-    throw new Error("Generation loop unexpected end");
+    });
+
+    // Directly access .text property from GenerateContentResponse
+    return response.text || "{}";
 }
