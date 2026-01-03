@@ -28,7 +28,6 @@ const Header: React.FC<HeaderProps> = ({
   onUpgrade,
   currentRecordingSeconds = 0
 }) => {
-  // Usage is strictly relative to the FREE_LIMIT_SECONDS constant defined in types.ts
   const totalUsed = (user?.secondsUsed || 0) + currentRecordingSeconds;
   const remainingSeconds = Math.max(0, FREE_LIMIT_SECONDS - totalUsed);
   const remainingPercent = (remainingSeconds / FREE_LIMIT_SECONDS) * 100;
@@ -121,8 +120,7 @@ const Header: React.FC<HeaderProps> = ({
                 {user ? (
                    <button 
                     onClick={onLogout}
-                    className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-100 text-slate-600 hover:bg-blue-50 hover:text-blue-600 transition-all border border-slate-200 text-xs md:text-sm font-bold"
-                    title={`Signed in as ${user.email}. Click to logout.`}
+                    className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-slate-100 text-slate-600 hover:bg-slate-200 transition-all border border-slate-200 text-xs md:text-sm font-bold shadow-md"
                    >
                      <UserIcon className="w-4 h-4" />
                      <span>Sign Out</span>
@@ -130,10 +128,10 @@ const Header: React.FC<HeaderProps> = ({
                 ) : (
                   <button 
                     onClick={onLogin}
-                    className="flex items-center gap-2 px-3 py-1.5 bg-blue-600 text-white rounded-full text-xs md:text-sm font-bold shadow-md hover:bg-blue-700 transition-all"
+                    className="flex items-center gap-2 px-4 py-1.5 bg-blue-600 text-white rounded-full text-xs md:text-sm font-bold shadow-md hover:bg-blue-700 transition-all"
                   >
                     <UserIcon className="w-4 h-4" />
-                    Sign In
+                    <span>Sign In</span>
                   </button>
                 )}
             </div>

@@ -38,10 +38,12 @@ const App: React.FC = () => {
     setDebugLogs(prev => [...prev, `${new Date().toLocaleTimeString('en-GB')} - ${msg}`]);
   };
 
+  // Strictly follow: [day] [Month] at [HH]h[MM]m
   const formatMeetingDateTime = (date: Date) => {
     const day = date.getDate();
     const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-    return `${day} ${months[date.getMonth()]} ${date.getFullYear()} at ${date.getHours().toString().padStart(2, '0')}h${date.getMinutes().toString().padStart(2, '0')}m`;
+    const time = `${date.getHours().toString().padStart(2, '0')}h${date.getMinutes().toString().padStart(2, '0')}m`;
+    return `${day} ${months[date.getMonth()]} at ${time}`;
   };
 
   const fetchUserProfile = async (email: string, uid: string) => {
@@ -54,34 +56,36 @@ const App: React.FC = () => {
       const profile = await res.json();
       setUser(profile);
       addLog(`User profile synced: ${email}`);
+      
+      // Clean up Stripe session params if present
+      const urlParams = new URLSearchParams(window.location.search);
+      if (urlParams.has('session_id')) {
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }
     } catch (err) {
       console.error("Auth profile error:", err);
-      setError("Failed to load user profile. Check your internet connection.");
+      setError("Failed to load user profile. Check your connection.");
     }
   };
 
   useEffect(() => {
     const handleCredentialResponse = async (response: any) => {
       const decoded = JSON.parse(atob(response.credential.split('.')[1]));
-      addLog(`Authenticated as ${decoded.email}`);
       fetchUserProfile(decoded.email, decoded.sub);
     };
 
-    const env = (import.meta as any).env;
-    const CLIENT_ID = env?.VITE_GOOGLE_CLIENT_ID;
+    const CLIENT_ID = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID;
 
     if ((window as any).google && CLIENT_ID) {
-      // 1. One Tap (Background check)
       google.accounts.id.initialize({
         client_id: CLIENT_ID,
         callback: handleCredentialResponse,
+        auto_select: true, // Crucial for Stripe return
         use_fedcm_for_prompt: false,
-        auto_select: false,
         itp_support: true
       });
       google.accounts.id.prompt();
 
-      // 2. OAuth2 Token Client (For manual clicks)
       tokenClientRef.current = google.accounts.oauth2.initTokenClient({
         client_id: CLIENT_ID,
         scope: 'email profile openid',
@@ -102,14 +106,11 @@ const App: React.FC = () => {
 
     const timer = setTimeout(() => {
       initDrive((token) => {
-          if (token) {
-              setIsDriveConnected(true);
-              addLog("Drive link active.");
-          } else {
-              setIsDriveConnected(false);
-          }
+          setIsDriveConnected(!!token);
+          if (token) addLog("Drive connection confirmed.");
       });
-    }, 500);
+    }, 1000);
+
     return () => clearTimeout(timer);
   }, []);
 
@@ -123,14 +124,9 @@ const App: React.FC = () => {
         body: JSON.stringify({ email: user.email, uid: user.uid })
       });
       const data = await res.json();
-      if (data.url) {
-        window.location.href = data.url;
-      } else {
-        throw new Error(data.error || "Stripe session creation failed.");
-      }
+      if (data.url) window.location.href = data.url;
     } catch (err) {
-      addLog("Stripe redirect failed.");
-      setError("Payment setup failed. Please try again.");
+      setError("Payment setup failed.");
     }
   };
 
@@ -154,8 +150,7 @@ const App: React.FC = () => {
       const mimeType = audioChunksRef.current[0].type || 'audio/webm';
       const blob = new Blob(audioChunksRef.current, { type: mimeType });
       setCombinedBlob(blob);
-      const url = URL.createObjectURL(blob);
-      setAudioUrl(url);
+      setAudioUrl(URL.createObjectURL(blob));
     }
   };
 
@@ -166,18 +161,16 @@ const App: React.FC = () => {
         index: audioChunksRef.current.length,
         chunk: chunk,
         timestamp: Date.now()
-    }).catch(err => console.error("DB save error", err));
+    }).catch(() => {});
   };
 
   const handleFileUpload = (file: File) => {
       if (!user) { handleLogin(); return; }
       audioChunksRef.current = [];
       setCombinedBlob(file);
-      const url = URL.createObjectURL(file);
-      setAudioUrl(url);
+      setAudioUrl(URL.createObjectURL(file));
       setAppState(AppState.PAUSED);
       setSessionStartTime(new Date(file.lastModified));
-      addLog(`File received: ${file.name}`);
       if (!title) setTitle(file.name.replace(/\.[^/.]+$/, ""));
   };
 
@@ -200,27 +193,25 @@ const App: React.FC = () => {
 
   const handleProcessAudio = async (mode: ProcessingMode) => {
     if (!combinedBlob || !user) return;
-    
     setLastRequestedMode(mode);
     let finalTitle = title.trim() || "Meeting";
     setTitle(finalTitle);
-
     setAppState(AppState.PROCESSING);
     setError(null);
 
     try {
       addLog("Starting analysis...");
       const newData = await processMeetingAudio(combinedBlob, combinedBlob.type || 'audio/webm', 'ALL', selectedModel, addLog, user.uid);
-      
       setMeetingData(newData);
       setAppState(AppState.COMPLETED);
-
       deleteSessionData(sessionIdRef.current).catch(() => {});
-      if (isDriveConnected) autoSyncToDrive(newData, finalTitle, combinedBlob);
+      
+      // Auto sync to drive if connected
+      if (isDriveConnected) {
+        autoSyncToDrive(newData, finalTitle, combinedBlob);
+      }
     } catch (apiError: any) {
-      const errMsg = apiError instanceof Error ? apiError.message : 'Unknown pipeline error';
-      addLog(`CRITICAL ERROR: ${errMsg}`);
-      setError(`Analysis failed: ${errMsg}`);
+      setError(`Analysis failed: ${apiError.message || 'Unknown error'}`);
       setAppState(AppState.PAUSED); 
     }
   };
@@ -228,18 +219,30 @@ const App: React.FC = () => {
   const autoSyncToDrive = async (data: MeetingData, currentTitle: string, blob: Blob | null) => {
     if (!isDriveConnected) return;
     const startTime = sessionStartTime || new Date();
-    const dateString = formatMeetingDateTime(startTime);
+    const dateTimeStr = formatMeetingDateTime(startTime);
     const cleanTitle = currentTitle.replace(/[()]/g, '').trim();
-    const safeBaseName = `${cleanTitle} on ${dateString}`.replace(/[/\\?%*:|"<>]/g, '-');
+    // Strictly formatted base name: [Titel] on [Datum] at [Tijd]
+    const safeBaseName = `${cleanTitle} on ${dateTimeStr}`;
+
+    addLog("Auto-syncing results to Google Drive...");
 
     if (blob) {
       const type = blob.type.toLowerCase();
       let ext = type.includes('mp4') ? 'm4a' : type.includes('wav') ? 'wav' : 'webm';
-      uploadAudioToDrive(`${safeBaseName} - audio.${ext}`, blob).catch(() => {});
+      uploadAudioToDrive(`${safeBaseName} - audio.${ext}`, blob).catch(e => addLog(`Drive Audio Error: ${e.message}`));
     }
 
-    const notesMarkdown = `# ${cleanTitle} notes\n*Recorded on ${dateString}*\n\n${data.summary}\n\n## Conclusions\n${data.conclusions.map(i => `- ${i}`).join('\n')}\n\n## Action Items\n${data.actionItems.map(i => `- ${i}`).join('\n')}`;
-    uploadTextToDrive(`${safeBaseName} - notes`, notesMarkdown, 'Notes').catch(() => {});
+    if (data.summary || data.conclusions.length > 0) {
+      const notesMarkdown = `# ${cleanTitle} notes\n*Recorded on ${dateTimeStr}*\n\n${data.summary}\n\n## Conclusions\n${data.conclusions.map(i => `- ${i}`).join('\n')}\n\n## Action Items\n${data.actionItems.map(i => `- ${i}`).join('\n')}`;
+      uploadTextToDrive(`${safeBaseName} - notes`, notesMarkdown, 'Notes').catch(e => addLog(`Drive Notes Error: ${e.message}`));
+    }
+
+    if (data.transcription && data.transcription.trim().length > 2) {
+      const transcriptMarkdown = `# ${cleanTitle} transcript\n*Recorded on ${dateTimeStr}*\n\n${data.transcription}`;
+      uploadTextToDrive(`${safeBaseName} - transcript`, transcriptMarkdown, 'Transcripts')
+        .then(() => addLog("Transcript saved to Drive."))
+        .catch(e => addLog(`Drive Transcript Error: ${e.message}`));
+    }
   };
 
   const handleDiscard = async () => {
