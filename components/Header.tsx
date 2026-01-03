@@ -28,6 +28,7 @@ const Header: React.FC<HeaderProps> = ({
   onUpgrade,
   currentRecordingSeconds = 0
 }) => {
+  // Usage is strictly relative to the FREE_LIMIT_SECONDS constant defined in types.ts
   const totalUsed = (user?.secondsUsed || 0) + currentRecordingSeconds;
   const remainingSeconds = Math.max(0, FREE_LIMIT_SECONDS - totalUsed);
   const remainingPercent = (remainingSeconds / FREE_LIMIT_SECONDS) * 100;
@@ -129,10 +130,10 @@ const Header: React.FC<HeaderProps> = ({
                 ) : (
                   <button 
                     onClick={onLogin}
-                    className="flex items-center gap-2 px-4 py-1.5 bg-blue-600 text-white rounded-full text-xs md:text-sm font-bold shadow-md hover:bg-blue-700 transition-all"
+                    className="flex items-center gap-2 px-3 py-1.5 bg-blue-600 text-white rounded-full text-xs md:text-sm font-bold shadow-md hover:bg-blue-700 transition-all"
                   >
                     <UserIcon className="w-4 h-4" />
-                    <span>Sign In</span>
+                    Sign In
                   </button>
                 )}
             </div>
