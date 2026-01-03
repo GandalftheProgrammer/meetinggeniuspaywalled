@@ -15,7 +15,8 @@ export default async (req: Request) => {
     return new Response("API_KEY missing", { status: 500 });
   }
 
-  const ai = new GoogleGenAI({ apiKey });
+  // Ensure Gemini SDK uses the key as named parameter as per guidelines
+  const ai = new GoogleGenAI({ apiKey: apiKey });
   let jobId: string = "";
 
   try {
@@ -25,28 +26,26 @@ export default async (req: Request) => {
 
     if (!jobId) return new Response("Missing jobId", { status: 400 });
 
-    // --- USAGE CHECK ---
     const userStore = getStore({ name: "user-profiles", consistency: "strong" });
     const profile = uid ? await userStore.get(uid, { type: "json" }) as any : null;
 
     if (!profile && uid) {
       console.error(`Gemini Background: Profile not found for UID: ${uid}`);
-      throw new Error("User account profile not found. Please logout and login again.");
+      throw new Error("User profile missing. Please log out and back in.");
     }
     
-    // Estimate duration from fileSize (roughly 64kbps audio = 8KB/s)
+    // Estimate duration: ~8KB/sec for common opus/compressed audio
     const estimatedDuration = Math.round(fileSize / 8000);
     
     if (profile && !profile.isPro && (profile.secondsUsed + estimatedDuration) > FREE_LIMIT_SECONDS) {
-        throw new Error("Free monthly usage limit reached. Please upgrade to Pro.");
+        throw new Error("Free monthly usage limit reached. Please upgrade.");
     }
 
     const resultStore = getStore({ name: "meeting-results", consistency: "strong" });
     const uploadStore = getStore({ name: "meeting-uploads", consistency: "strong" });
 
-    // Handshake
-    const encodedKey = encodeURIComponent(apiKey);
-    const handshakeUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodedKey}`;
+    // Resumable Handshake - appending key to initial request is standard
+    const handshakeUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${apiKey}`;
     const initResp = await fetch(handshakeUrl, {
         method: 'POST',
         headers: {
@@ -60,47 +59,51 @@ export default async (req: Request) => {
     });
 
     if (!initResp.ok) {
-      const err = await initResp.text();
-      throw new Error(`Gemini File Handshake failed: ${err}`);
+      const err = await initResp.json();
+      throw new Error(`Gemini Handshake failed: ${JSON.stringify(err)}`);
     }
 
     let uploadUrl = initResp.headers.get('x-goog-upload-url') || "";
-    if (!uploadUrl.includes('key=')) uploadUrl += (uploadUrl.includes('?') ? '&' : '?') + `key=${encodedKey}`;
+    // If the returned uploadUrl doesn't have the key, add it for the subsequent requests
+    if (!uploadUrl.includes('key=')) {
+        uploadUrl += (uploadUrl.includes('?') ? '&' : '?') + `key=${apiKey}`;
+    }
 
     // Upload Loop
-    const GEMINI_CHUNK_SIZE = 8 * 1024 * 1024;
+    const GEMINI_CHUNK_SIZE = 4 * 1024 * 1024; // Smaller chunks for more reliability
     let buffer = Buffer.alloc(0);
     let uploadOffset = 0;
 
     for (let i = 0; i < totalChunks; i++) {
         const chunkBase64 = await uploadStore.get(`${jobId}/${i}`, { type: 'text' });
-        if (!chunkBase64) throw new Error(`Missing chunk ${i}`);
+        if (!chunkBase64) throw new Error(`Missing chunk data at index ${i}`);
+        
         const chunkBuffer = Buffer.from(chunkBase64, 'base64');
         buffer = Buffer.concat([buffer, chunkBuffer]);
-        await uploadStore.delete(`${jobId}/${i}`);
+        await uploadStore.delete(`${jobId}/${i}`); // Clean up as we go
 
         while (buffer.length >= GEMINI_CHUNK_SIZE) {
             const chunkToSend = buffer.subarray(0, GEMINI_CHUNK_SIZE);
             buffer = buffer.subarray(GEMINI_CHUNK_SIZE);
-            await fetch(uploadUrl, {
+            
+            const up = await fetch(uploadUrl, {
                 method: 'POST',
                 headers: {
-                    'Content-Length': String(GEMINI_CHUNK_SIZE),
                     'X-Goog-Upload-Command': 'upload',
                     'X-Goog-Upload-Offset': String(uploadOffset),
                     'Content-Type': 'application/octet-stream'
                 },
                 body: chunkToSend
             });
+            if (!up.ok) throw new Error("Chunk upload failed to Google Storage.");
             uploadOffset += GEMINI_CHUNK_SIZE;
         }
     }
 
-    // Finalize
+    // Finalize upload
     const finalResp = await fetch(uploadUrl, {
         method: 'POST',
         headers: {
-            'Content-Length': String(buffer.length),
             'X-Goog-Upload-Command': 'upload, finalize',
             'X-Goog-Upload-Offset': String(uploadOffset),
             'Content-Type': 'application/octet-stream'
@@ -108,27 +111,28 @@ export default async (req: Request) => {
         body: buffer
     });
 
-    if (!finalResp.ok) {
-      const err = await finalResp.text();
-      throw new Error(`Gemini File Finalize failed: ${err}`);
-    }
+    if (!finalResp.ok) throw new Error("File finalization failed.");
 
     const fileResult = await finalResp.json();
     const fileUri = fileResult.file?.uri || fileResult.uri;
     
-    // Polling ACTIVE
-    let activeAttempts = 0;
-    while (activeAttempts < 60) {
-        const poll = await fetch(`${fileUri}?key=${encodedKey}`);
+    // Polling for file to become ACTIVE
+    let isReady = false;
+    for (let i = 0; i < 30; i++) {
+        const poll = await fetch(`${fileUri}?key=${apiKey}`);
         const d = await poll.json();
         const state = d.state || d.file?.state;
-        if (state === 'ACTIVE') break;
-        if (state === 'FAILED') throw new Error("Gemini file processing failed (state: FAILED).");
+        if (state === 'ACTIVE') {
+            isReady = true;
+            break;
+        }
+        if (state === 'FAILED') throw new Error("File processing state: FAILED.");
         await new Promise(r => setTimeout(r, 2000));
-        activeAttempts++;
     }
 
-    // Generate using Gemini SDK
+    if (!isReady) throw new Error("File timed out while becoming ACTIVE.");
+
+    // Final AI Generation
     const response = await ai.models.generateContent({
       model: model || 'gemini-3-flash-preview',
       contents: {
@@ -143,10 +147,10 @@ export default async (req: Request) => {
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            transcription: { type: Type.STRING, description: "Full transcript of the meeting." },
-            summary: { type: Type.STRING, description: "Executive summary of the meeting." },
-            conclusions: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Key insights and conclusions." },
-            actionItems: { type: Type.ARRAY, items: { type: Type.STRING }, description: "List of actionable items and owners if identified." }
+            transcription: { type: Type.STRING },
+            summary: { type: Type.STRING },
+            conclusions: { type: Type.ARRAY, items: { type: Type.STRING } },
+            actionItems: { type: Type.ARRAY, items: { type: Type.STRING } }
           },
           required: ["transcription", "summary", "conclusions", "actionItems"]
         }
@@ -154,11 +158,8 @@ export default async (req: Request) => {
     });
 
     const resultText = response.text || "{}";
-
-    // Save Result
     await resultStore.setJSON(jobId, { status: 'COMPLETED', result: resultText });
 
-    // Update Usage after successful generation
     if (profile && !profile.isPro) {
       profile.secondsUsed += estimatedDuration;
       await userStore.setJSON(profile.uid, profile);
@@ -167,8 +168,10 @@ export default async (req: Request) => {
   } catch (err: any) {
     console.error(`Gemini Background Job ${jobId} Failed:`, err);
     const resultStore = getStore({ name: "meeting-results", consistency: "strong" });
-    await resultStore.setJSON(jobId, { status: 'ERROR', error: err.message });
+    // Stringify error object if it's a raw object from an API response
+    const errMsg = typeof err === 'string' ? err : (err.message || JSON.stringify(err));
+    await resultStore.setJSON(jobId, { status: 'ERROR', error: errMsg });
   }
   
-  return new Response("Processing started");
+  return new Response("Processing initiated");
 };

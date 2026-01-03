@@ -1,6 +1,6 @@
 
 import React from 'react';
-import { CheckCircle2, Bot, ChevronDown, Crown, LogOut, User as UserIcon } from 'lucide-react';
+import { CheckCircle2, Bot, ChevronDown, Crown, User as UserIcon } from 'lucide-react';
 import { GeminiModel, UserProfile, FREE_LIMIT_SECONDS } from '../types';
 
 interface HeaderProps {
@@ -13,6 +13,7 @@ interface HeaderProps {
   onLogin: () => void;
   onLogout: () => void;
   onUpgrade: () => void;
+  currentRecordingSeconds?: number;
 }
 
 const Header: React.FC<HeaderProps> = ({ 
@@ -24,17 +25,22 @@ const Header: React.FC<HeaderProps> = ({
   user,
   onLogin,
   onLogout,
-  onUpgrade
+  onUpgrade,
+  currentRecordingSeconds = 0
 }) => {
-  const remainingSeconds = user ? Math.max(0, FREE_LIMIT_SECONDS - user.secondsUsed) : FREE_LIMIT_SECONDS;
+  // Total used = stored usage + what's currently being recorded
+  const totalUsed = (user?.secondsUsed || 0) + currentRecordingSeconds;
+  const remainingSeconds = Math.max(0, FREE_LIMIT_SECONDS - totalUsed);
   const remainingPercent = (remainingSeconds / FREE_LIMIT_SECONDS) * 100;
   
-  // Format seconds to readable hours/minutes
   const formatRemaining = (s: number) => {
     const hours = Math.floor(s / 3600);
     const minutes = Math.floor((s % 3600) / 60);
+    const seconds = s % 60;
+    
     if (hours > 0) return `${hours}h ${minutes}m left`;
-    return `${minutes}m left`;
+    if (minutes > 0) return `${minutes}m ${seconds}s left`;
+    return `${seconds}s left`;
   };
 
   return (
@@ -50,7 +56,6 @@ const Header: React.FC<HeaderProps> = ({
         </div>
 
         <div className="flex items-center gap-2 md:gap-4 overflow-x-auto max-w-full pb-1 md:pb-0">
-            {/* Usage/Plan Badge */}
             {user && (
               <div className="hidden sm:flex items-center gap-3 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-full">
                 {user.isPro ? (
@@ -59,10 +64,10 @@ const Header: React.FC<HeaderProps> = ({
                     Pro Plan
                   </div>
                 ) : (
-                  <div className="flex items-center gap-2 min-w-[120px]">
+                  <div className="flex items-center gap-2 min-w-[140px]">
                     <div className="flex-1 h-1.5 bg-slate-200 rounded-full overflow-hidden w-16">
                       <div 
-                        className="h-full bg-blue-500 transition-all duration-500" 
+                        className="h-full bg-blue-500 transition-all duration-300" 
                         style={{ width: `${remainingPercent}%` }}
                       />
                     </div>
@@ -117,7 +122,7 @@ const Header: React.FC<HeaderProps> = ({
                    <button 
                     onClick={onLogout}
                     className="flex items-center gap-2 p-1.5 px-2 md:px-3 rounded-full bg-slate-100 text-slate-600 hover:bg-red-50 hover:text-red-600 transition-all border border-slate-200"
-                    title={`Signed in as ${user.email}`}
+                    title={`Signed in as ${user.email}. Click to logout.`}
                    >
                      <UserIcon className="w-4 h-4" />
                      <span className="hidden sm:inline text-xs font-bold">Profile</span>

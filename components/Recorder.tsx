@@ -18,6 +18,7 @@ interface RecorderProps {
   user: UserProfile | null;
   onUpgrade: () => void;
   onLogin: () => void;
+  onRecordingTick?: (seconds: number) => void;
 }
 
 type AudioSource = 'microphone' | 'system';
@@ -33,7 +34,8 @@ const Recorder: React.FC<RecorderProps> = ({
   debugLogs,
   user,
   onUpgrade,
-  onLogin
+  onLogin,
+  onRecordingTick
 }) => {
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
@@ -63,11 +65,15 @@ const Recorder: React.FC<RecorderProps> = ({
     };
   }, []);
 
+  // Sync recording time to parent for live gauge
+  useEffect(() => {
+    if (onRecordingTick) onRecordingTick(recordingTime);
+  }, [recordingTime, onRecordingTick]);
+
   // Usage Monitor logic - More aggressive check
   useEffect(() => {
     if (isRecording) {
       if (!user) {
-        // If somehow they start recording without being logged in, stop them
         stopRecording();
         onLogin();
         return;
@@ -243,10 +249,13 @@ const Recorder: React.FC<RecorderProps> = ({
               Unlock Unlimited for €10
             </button>
             <button 
-              onClick={() => setLimitReached(false)}
+              onClick={() => {
+                setLimitReached(false);
+                setRecordingTime(0);
+              }}
               className="text-slate-400 text-sm font-medium hover:text-slate-600"
             >
-              Continue with current recording
+              Back to Recorder
             </button>
           </div>
         </div>

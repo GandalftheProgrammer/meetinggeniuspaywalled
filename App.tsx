@@ -7,20 +7,20 @@ import { AppState, MeetingData, ProcessingMode, GeminiModel, UserProfile } from 
 import { processMeetingAudio } from './services/geminiService';
 import { initDrive, connectToDrive, uploadAudioToDrive, uploadTextToDrive, disconnectDrive } from './services/driveService';
 import { saveChunkToDB, getChunksForSession, getPendingSessions, deleteSessionData } from './services/db';
-import { AlertCircle, RotateCcw } from 'lucide-react';
+import { AlertCircle } from 'lucide-react';
 
 declare const google: any;
 
 const App: React.FC = () => {
   const [appState, setAppState] = useState<AppState>(AppState.IDLE);
   const [title, setTitle] = useState<string>("");
-  // Fix: Default to Gemini 3 Flash for basic text/summarization tasks as per guidelines
   const [selectedModel, setSelectedModel] = useState<GeminiModel>('gemini-3-flash-preview');
   const [lastRequestedMode, setLastRequestedMode] = useState<ProcessingMode>('NOTES_ONLY');
   
   const [meetingData, setMeetingData] = useState<MeetingData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [user, setUser] = useState<UserProfile | null>(null);
+  const [currentRecordingSeconds, setCurrentRecordingSeconds] = useState(0);
   
   const audioChunksRef = useRef<Blob[]>([]);
   const sessionIdRef = useRef<string>(`session_${Date.now()}`);
@@ -32,8 +32,6 @@ const App: React.FC = () => {
   const [debugLogs, setDebugLogs] = useState<string[]>([]);
   const [sessionStartTime, setSessionStartTime] = useState<Date | null>(null);
 
-  const [recoverableSession, setRecoverableSession] = useState<{sessionId: string, title: string} | null>(null);
-
   const addLog = (msg: string) => {
     setDebugLogs(prev => [...prev, `${new Date().toLocaleTimeString('en-GB')} - ${msg}`]);
   };
@@ -44,20 +42,11 @@ const App: React.FC = () => {
     return `${day} ${months[date.getMonth()]} ${date.getFullYear()} at ${date.getHours().toString().padStart(2, '0')}h${date.getMinutes().toString().padStart(2, '0')}m`;
   };
 
-  // --- AUTH LOGIC ---
   useEffect(() => {
-    const checkRecovery = async () => {
-        const sessions = await getPendingSessions();
-        if (sessions.length > 0) setRecoverableSession(sessions[0]);
-    };
-    checkRecovery();
-
-    // Initialize Google Sign-In
     const handleCredentialResponse = async (response: any) => {
       const decoded = JSON.parse(atob(response.credential.split('.')[1]));
       addLog(`Authenticated as ${decoded.email}`);
       
-      // Fetch user profile from backend
       try {
         const res = await fetch('/.netlify/functions/get-user', {
           method: 'POST',
@@ -68,13 +57,12 @@ const App: React.FC = () => {
         setUser(profile);
       } catch (err) {
         console.error("Auth profile error:", err);
-        setError("Failed to load user profile. Please try signing in again.");
+        setError("Failed to load user profile. Check your internet connection.");
       }
     };
 
     const CLIENT_ID = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID;
 
-    // Fix: Cast window to any to access the global 'google' object and resolve TS error
     if ((window as any).google && CLIENT_ID) {
       google.accounts.id.initialize({
         client_id: CLIENT_ID,
@@ -83,11 +71,7 @@ const App: React.FC = () => {
         auto_select: false,
         itp_support: true
       });
-      google.accounts.id.prompt(); // Display One Tap
-    } else if (!(window as any).google) {
-      console.warn("Google identity services not loaded.");
-    } else if (!CLIENT_ID) {
-      console.error("VITE_GOOGLE_CLIENT_ID is not configured in environment variables.");
+      google.accounts.id.prompt();
     }
 
     const timer = setTimeout(() => {
@@ -104,10 +88,7 @@ const App: React.FC = () => {
   }, []);
 
   const handleUpgrade = async () => {
-    if (!user) {
-      handleLogin();
-      return;
-    }
+    if (!user) { handleLogin(); return; }
     addLog("Redirecting to Stripe...");
     try {
       const res = await fetch('/.netlify/functions/create-checkout', {
@@ -123,18 +104,13 @@ const App: React.FC = () => {
       }
     } catch (err) {
       addLog("Stripe redirect failed.");
-      setError("Payment setup failed. Please check your internet connection.");
+      setError("Payment setup failed. Please try again.");
     }
   };
 
   const handleLogin = () => {
     if ((window as any).google) {
-      google.accounts.id.prompt((notification: any) => {
-        if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
-          console.log("One Tap skipped or not displayed", notification.getNotDisplayedReason());
-          // Handle cases where One Tap might be blocked or dismissed
-        }
-      });
+      google.accounts.id.prompt();
     }
   };
 
@@ -184,12 +160,12 @@ const App: React.FC = () => {
       audioChunksRef.current = [];
       setSessionStartTime(new Date());
       setAppState(AppState.RECORDING);
-      setRecoverableSession(null);
       setError(null);
     } else {
        if (appState === AppState.RECORDING) {
          setAppState(AppState.PAUSED);
          finalizeAudio();
+         setCurrentRecordingSeconds(0);
        }
     }
   };
@@ -249,6 +225,7 @@ const App: React.FC = () => {
     setDebugLogs([]);
     setTitle("");
     setError(null);
+    setCurrentRecordingSeconds(0);
   };
 
   return (
@@ -263,6 +240,7 @@ const App: React.FC = () => {
         onLogin={handleLogin}
         onLogout={handleLogout}
         onUpgrade={handleUpgrade}
+        currentRecordingSeconds={currentRecordingSeconds}
       />
       <main className="flex-1 w-full max-w-7xl mx-auto px-4 py-8 md:py-12">
         {error && (
@@ -301,6 +279,7 @@ const App: React.FC = () => {
               user={user}
               onUpgrade={handleUpgrade}
               onLogin={handleLogin}
+              onRecordingTick={setCurrentRecordingSeconds}
             />
           </div>
         )}
