@@ -8,7 +8,6 @@ const FREE_LIMIT_SECONDS = 18000;
 export default async (req: Request) => {
   if (req.method !== 'POST') return new Response("OK");
 
-  // 1. CLEAN API KEY (from working version pattern)
   let apiKey = process.env.API_KEY ? process.env.API_KEY.trim() : "";
   if (apiKey.startsWith('"') && apiKey.endsWith('"')) {
       apiKey = apiKey.slice(1, -1);
@@ -46,9 +45,8 @@ export default async (req: Request) => {
     const resultStore = getStore({ name: "meeting-results", consistency: "strong" });
     const uploadStore = getStore({ name: "meeting-uploads", consistency: "strong" });
 
-    // 2. INITIALIZE UPLOAD VIA URL AUTH
+    // 1. INITIALIZE UPLOAD
     const handshakeUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodedKey}`;
-    
     const initResp = await fetch(handshakeUrl, {
         method: 'POST',
         headers: {
@@ -61,27 +59,22 @@ export default async (req: Request) => {
         body: JSON.stringify({ file: { display_name: `Meeting_${jobId}` } })
     });
 
-    if (!initResp.ok) {
-      const errText = await initResp.text();
-      throw new Error(`Gemini Handshake failed (${initResp.status}): ${errText}`);
-    }
+    if (!initResp.ok) throw new Error(`Handshake failed: ${await initResp.text()}`);
 
-    // 3. PATCH UPLOAD URL WITH KEY
     let uploadUrl = initResp.headers.get('x-goog-upload-url') || "";
-    if (!uploadUrl) throw new Error("No upload URL returned from Google.");
-    
     if (!uploadUrl.includes('key=')) {
         const sep = uploadUrl.includes('?') ? '&' : '?';
         uploadUrl = `${uploadUrl}${sep}key=${encodedKey}`;
     }
 
+    // 2. STITCH & UPLOAD
     const GEMINI_CHUNK_SIZE = 4 * 1024 * 1024; 
     let buffer = Buffer.alloc(0);
     let uploadOffset = 0;
 
     for (let i = 0; i < totalChunks; i++) {
         const chunkBase64 = await uploadStore.get(`${jobId}/${i}`, { type: 'text' });
-        if (!chunkBase64) throw new Error(`Missing chunk data at index ${i}`);
+        if (!chunkBase64) throw new Error(`Missing chunk ${i}`);
         
         const chunkBuffer = Buffer.from(chunkBase64, 'base64');
         buffer = Buffer.concat([buffer, chunkBuffer]);
@@ -90,8 +83,7 @@ export default async (req: Request) => {
         while (buffer.length >= GEMINI_CHUNK_SIZE) {
             const chunkToSend = buffer.subarray(0, GEMINI_CHUNK_SIZE);
             buffer = buffer.subarray(GEMINI_CHUNK_SIZE);
-            
-            const up = await fetch(uploadUrl, {
+            await fetch(uploadUrl, {
                 method: 'POST',
                 headers: {
                     'X-Goog-Upload-Command': 'upload',
@@ -100,7 +92,6 @@ export default async (req: Request) => {
                 },
                 body: chunkToSend
             });
-            if (!up.ok) throw new Error(`Chunk upload failed with status ${up.status}`);
             uploadOffset += GEMINI_CHUNK_SIZE;
         }
     }
@@ -114,31 +105,31 @@ export default async (req: Request) => {
         },
         body: buffer
     });
-
-    if (!finalResp.ok) throw new Error(`File finalization failed (${finalResp.status})`);
+    if (!finalResp.ok) throw new Error("Finalize failed");
 
     const fileResult = await finalResp.json();
     const fileUri = fileResult.file?.uri || fileResult.uri;
     
-    // 4. POLL FOR ACTIVE (URL AUTH)
+    // 3. POLL FOR ACTIVE
     let isReady = false;
     for (let i = 0; i < 60; i++) {
         const poll = await fetch(`${fileUri}?key=${encodedKey}`);
         const d = await poll.json();
         const state = d.state || d.file?.state;
-        if (state === 'ACTIVE') {
-            isReady = true;
-            break;
-        }
-        if (state === 'FAILED') throw new Error("File processing state: FAILED.");
+        if (state === 'ACTIVE') { isReady = true; break; }
         await new Promise(r => setTimeout(r, 2000));
     }
+    if (!isReady) throw new Error("File polling timeout");
 
-    if (!isReady) throw new Error("File timed out while becoming ACTIVE.");
-
-    // 5. GENERATE CONTENT VIA RAW REST (matching the working pattern)
+    // 4. GENERATE CONTENT (with robust instructions and explicit schema)
     const generateUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model || 'gemini-3-flash-preview'}:generateContent?key=${encodedKey}`;
     
+    const systemInstructionText = `You are an expert meeting secretary.
+    1. CRITICAL: Analyze the audio to detect the primary language.
+    2. CRITICAL: All output (transcription, summary, conclusions, action items) MUST be in the DETECTED LANGUAGE.
+    3. Transcription must be verbatim. Summary must be detailed and capture nuances.
+    4. Conclusions must be an array of key insights. Action items must be an array of explicit tasks.`;
+
     const generateResp = await fetch(generateUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -146,15 +137,25 @@ export default async (req: Request) => {
             contents: [{
                 parts: [
                     { file_data: { file_uri: fileUri, mime_type: mimeType } },
-                    { text: "Transcribe and summarize this meeting recording. Return strict JSON." }
+                    { text: "Generate the meeting minutes now. Ensure the summary is comprehensive and the transcription is full." }
                 ]
             }],
             system_instruction: {
-                parts: [{ text: "You are an expert meeting secretary. Analyze audio to detect primary language. All output MUST be in the DETECTED LANGUAGE." }]
+                parts: [{ text: systemInstructionText }]
             },
             generation_config: {
                 response_mime_type: "application/json",
-                max_output_tokens: 8192
+                max_output_tokens: 8192,
+                response_schema: {
+                  type: "object",
+                  properties: {
+                    transcription: { type: "string" },
+                    summary: { type: "string" },
+                    conclusions: { type: "array", items: { type: "string" } },
+                    actionItems: { type: "array", items: { type: "string" } }
+                  },
+                  required: ["transcription", "summary", "conclusions", "actionItems"]
+                }
             },
             safety_settings: [
                 { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
@@ -165,10 +166,7 @@ export default async (req: Request) => {
         })
     });
 
-    if (!generateResp.ok) {
-        const genErr = await generateResp.text();
-        throw new Error(`Generation failed (${generateResp.status}): ${genErr}`);
-    }
+    if (!generateResp.ok) throw new Error(`Generation error: ${generateResp.status}`);
 
     const genData = await generateResp.json();
     const resultText = genData.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
@@ -181,10 +179,9 @@ export default async (req: Request) => {
     }
 
   } catch (err: any) {
-    console.error(`Gemini Background Job ${jobId} Failed:`, err);
+    console.error(`Gemini Background Job Failed:`, err);
     const resultStore = getStore({ name: "meeting-results", consistency: "strong" });
-    const errMsg = typeof err === 'string' ? err : (err.message || JSON.stringify(err));
-    await resultStore.setJSON(jobId, { status: 'ERROR', error: errMsg });
+    await resultStore.setJSON(jobId, { status: 'ERROR', error: err.message });
   }
   
   return new Response("Processing initiated");

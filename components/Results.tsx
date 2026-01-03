@@ -1,6 +1,7 @@
+
 import React, { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { FileText, ListChecks, ArrowLeft, FileAudio, Download, Eye } from 'lucide-react';
+import { FileText, ListChecks, ArrowLeft, FileAudio, Download, Eye, CheckCircle } from 'lucide-react';
 import { MeetingData, ProcessingMode } from '../types';
 
 interface ResultsProps {
@@ -27,8 +28,8 @@ const Results: React.FC<ResultsProps> = ({
   const [showNotes, setShowNotes] = useState(initialMode !== 'TRANSCRIPT_ONLY');
   const [showTranscript, setShowTranscript] = useState(initialMode !== 'NOTES_ONLY');
 
-  const hasNotes = data.summary && data.summary.length > 0;
-  const hasTranscript = data.transcription && data.transcription.length > 0;
+  const hasNotes = data.summary && data.summary.trim().length > 0;
+  const hasTranscript = data.transcription && data.transcription.trim().length > 0;
 
   const cleanTitle = title.replace(/[()]/g, '').trim();
   const baseName = `${cleanTitle} on ${sessionDateString}`;
@@ -39,16 +40,16 @@ const Results: React.FC<ResultsProps> = ({
 *Recorded on ${sessionDateString}*
 
 ## Summary
-${data.summary.trim()}
+${data.summary.trim() || "No summary returned."}
 
 ## Conclusions & Insights
-${data.conclusions.map(d => `- ${d}`).join('\n')}
+${data.conclusions.length > 0 ? data.conclusions.map(d => `- ${d}`).join('\n') : "No conclusions recorded."}
 
 ## Action Items
-${data.actionItems.map(item => `- [ ] ${item}`).join('\n')}
+${data.actionItems.length > 0 ? data.actionItems.map(item => `- [ ] ${item}`).join('\n') : "No action items identified."}
   `.trim();
 
-  const transcriptMarkdown = `# ${cleanTitle} transcript\n\n*Recorded on ${sessionDateString}*\n\n${data.transcription.trim()}`;
+  const transcriptMarkdown = `# ${cleanTitle} transcript\n\n*Recorded on ${sessionDateString}*\n\n${data.transcription.trim() || "No transcript returned."}`;
 
   const downloadBlob = (blob: Blob, suffix: string) => {
     const url = URL.createObjectURL(blob);
@@ -64,53 +65,28 @@ ${data.actionItems.map(item => `- [ ] ${item}`).join('\n')}
   };
 
   const downloadAsDoc = (markdown: string, suffix: string) => {
-    // 1. Replace block elements with HTML tags including INLINE STYLES for Word compatibility
     let htmlBody = markdown
       .replace(/^# (.*$)/gm, '<h1 style="color:#1e3a8a; margin-bottom:12px; font-size: 24pt;">$1</h1>')
       .replace(/^## (.*$)/gm, '<h2 style="color:#1e3a8a; margin-top:24px; margin-bottom:12px; font-size: 16pt;">$1</h2>')
       .replace(/^\*Recorded on (.*)\*$/gm, '<p style="color: #64748b; font-style: italic; margin-bottom: 20px;">Recorded on $1</p>')
       .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-      // Tight spacing for list items (margin-bottom:0) to prevent double spacing in Word
       .replace(/- \[ \] (.*$)/gm, '<li style="margin-bottom:0;">☐ $1</li>')
       .replace(/- (.*$)/gm, '<li style="margin-bottom:0;">$1</li>');
 
-    // 2. GLUE ADJACENT LIST ITEMS
-    // This looks for a closing </li> followed by ANY amount of whitespace (newlines, spaces)
-    // and then an opening <li. It replaces the whitespace with NOTHING, effectively gluing them.
-    // This ensures <li>Item 1</li>   \n   <li>Item 2</li> becomes <li>Item 1</li><li>Item 2</li>
     htmlBody = htmlBody.replace(/<\/li>\s+(?=<li)/g, '</li>');
-
-    // 3. WRAP LISTS IN UL
-    // Now we simply look for chains of list items. Since they are glued, a simple greedy regex works.
     htmlBody = htmlBody.replace(/((?:<li[\s\S]*?<\/li>)+)/g, '<ul style="margin-top:0; margin-bottom:12px; padding-left:20px;">$1</ul>');
 
-    // 4. Process remaining text lines into paragraphs
     const lines = htmlBody.split('\n');
     const processedLines = lines.map(line => {
         const trimmed = line.trim();
         if (!trimmed) return '';
-        
-        // If line is already a block tag (h1, h2, ul, li, p), preserve it
-        // Note: checking for startsWith <li is theoretically not needed if step 3 worked perfectly,
-        // but kept for safety.
-        if (
-            trimmed.startsWith('<h1') || 
-            trimmed.startsWith('<h2') || 
-            trimmed.startsWith('<p') || 
-            trimmed.startsWith('<ul') || 
-            trimmed.startsWith('<li') ||
-            trimmed.startsWith('</ul')
-        ) {
+        if (trimmed.startsWith('<h1') || trimmed.startsWith('<h2') || trimmed.startsWith('<p') || trimmed.startsWith('<ul') || trimmed.startsWith('<li') || trimmed.startsWith('</ul')) {
             return trimmed;
         }
-        
-        // Wrap plain text (summaries, transcripts) in styled paragraphs
         return `<p style="margin-bottom: 12px;">${trimmed}</p>`;
     });
 
-    // Join with EMPTY STRING to avoid "ghost" text nodes causing extra spacing
     const finalHtmlBody = processedLines.filter(l => l).join('');
-
     const htmlContent = `<html><body style="font-family:Arial, sans-serif; color:#334155; line-height:1.6; padding:20px;">${finalHtmlBody}</body></html>`;
     const blob = new Blob(['\ufeff', htmlContent], { type: 'application/msword' });
     const url = URL.createObjectURL(blob);
@@ -144,7 +120,16 @@ ${data.actionItems.map(item => `- [ ] ${item}`).join('\n')}
   return (
     <div className="w-full max-w-6xl mx-auto animate-in fade-in slide-in-from-bottom-8 duration-500">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
-        <button onClick={onReset} className="flex items-center gap-2 text-slate-500 hover:text-slate-800 transition-colors text-sm font-medium"><ArrowLeft className="w-4 h-4" />Back to record</button>
+        <div className="flex items-center gap-4">
+          <button onClick={onReset} className="flex items-center gap-2 text-slate-500 hover:text-slate-800 transition-colors text-sm font-bold">
+            <ArrowLeft className="w-4 h-4" />
+            Back to record
+          </button>
+          <div className="flex items-center gap-1.5 px-3 py-1 bg-green-50 text-green-700 rounded-full text-[10px] font-bold border border-green-100 uppercase tracking-tight">
+            <CheckCircle className="w-3 h-3" />
+            Saved to Drive & History
+          </div>
+        </div>
         <div className="flex flex-wrap items-center gap-2">
            {audioBlob && <button onClick={() => downloadBlob(audioBlob, 'audio')} className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 rounded-lg text-sm font-semibold transition-all shadow-sm"><FileAudio className="w-4 h-4" />Audio</button>}
            {hasNotes && <button onClick={() => downloadAsDoc(notesMarkdown, 'notes')} className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 rounded-lg text-sm font-semibold transition-all shadow-sm"><Download className="w-4 h-4" />Notes</button>}

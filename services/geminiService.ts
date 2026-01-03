@@ -1,11 +1,6 @@
 
 import { MeetingData, ProcessingMode, GeminiModel } from '../types';
 
-const SYSTEM_INSTRUCTION = `You are an expert meeting secretary.
-1. Analyze audio to detect the primary language.
-2. All output MUST be in the DETECTED LANGUAGE.
-3. Return a raw JSON object with: transcription, summary, conclusions (array), actionItems (array).`;
-
 export const processMeetingAudio = async (
   audioBlob: Blob, 
   defaultMimeType: string, 
@@ -26,23 +21,19 @@ export const processMeetingAudio = async (
     const totalBytes = audioBlob.size;
     const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(7)}`;
     
-    // Step 1: Divide into 4MB chunks
     const UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024; 
     const totalChunks = Math.ceil(totalBytes / UPLOAD_CHUNK_SIZE);
     let offset = 0;
     let chunkIndex = 0;
 
     log(`Total Audio Size: ${(totalBytes / (1024 * 1024)).toFixed(2)} MB`);
-    log(`Slicing file into ${totalChunks} secure chunks...`);
 
     while (offset < totalBytes) {
         const chunkEnd = Math.min(offset + UPLOAD_CHUNK_SIZE, totalBytes);
         const chunkBlob = audioBlob.slice(offset, chunkEnd);
         const base64Data = await blobToBase64(chunkBlob);
 
-        const progress = Math.round(((chunkIndex + 1) / totalChunks) * 100);
-        log(`Uploading chunk ${chunkIndex + 1}/${totalChunks} to cloud storage...`);
-        log(`>> Progress: ${progress}% (${(chunkEnd / (1024 * 1024)).toFixed(2)} MB uploaded)`);
+        log(`Uploading chunk ${chunkIndex + 1}/${totalChunks}...`);
 
         const uploadResp = await fetch('/.netlify/functions/gemini', {
             method: 'POST',
@@ -50,10 +41,7 @@ export const processMeetingAudio = async (
             body: JSON.stringify({ action: 'upload_chunk', jobId, chunkIndex, data: base64Data })
         });
 
-        if (!uploadResp.ok) {
-            log(`ERROR: Chunk ${chunkIndex} upload failed.`);
-            throw new Error(`Upload failed at chunk ${chunkIndex}`);
-        }
+        if (!uploadResp.ok) throw new Error(`Upload failed at chunk ${chunkIndex}`);
         offset += UPLOAD_CHUNK_SIZE;
         chunkIndex++;
     }
@@ -65,17 +53,12 @@ export const processMeetingAudio = async (
         body: JSON.stringify({ jobId, totalChunks: chunkIndex, mimeType, mode: 'ALL', model, fileSize: totalBytes, uid })
     });
 
-    if (!triggerResp.ok) {
-        log("ERROR: Failed to trigger background worker.");
-        throw new Error("Worker handshake failed.");
-    }
+    if (!triggerResp.ok) throw new Error("Worker handshake failed.");
 
     log("Background analysis started. Waiting for Gemini response...");
     let attempts = 0;
     while (attempts < 600) {
         attempts++;
-        if (attempts % 3 === 0) log(`Gemini is still processing... (Ping ${attempts})`);
-        
         await new Promise(r => setTimeout(r, 3000));
         const pollResp = await fetch('/.netlify/functions/gemini', {
             method: 'POST',
@@ -89,10 +72,7 @@ export const processMeetingAudio = async (
                 log("Processing SUCCESS! Building results...");
                 return parseResponse(data.result, mode);
             }
-            if (data.status === 'ERROR') {
-                log(`CRITICAL AI ERROR: ${data.error}`);
-                throw new Error(data.error);
-            }
+            if (data.status === 'ERROR') throw new Error(data.error);
         }
     }
     throw new Error("Timeout: Gemini is taking too long.");
@@ -123,16 +103,18 @@ function blobToBase64(blob: Blob): Promise<string> {
 }
 
 function parseResponse(jsonText: string, mode: ProcessingMode): MeetingData {
+    // Remove potential markdown fences
     const cleanText = jsonText.replace(/```json/g, '').replace(/```/g, '').trim();
     try {
         const rawData = JSON.parse(cleanText);
         return {
             transcription: rawData.transcription || "No transcript returned.",
             summary: rawData.summary || "No summary returned.",
-            conclusions: rawData.conclusions || [],
-            actionItems: rawData.actionItems || []
+            conclusions: Array.isArray(rawData.conclusions) ? rawData.conclusions : [],
+            actionItems: Array.isArray(rawData.actionItems) ? rawData.actionItems : []
         };
     } catch (e) {
-        return { transcription: "", summary: "Data corrupted. Try again.", conclusions: [], actionItems: [] };
+        console.error("Parse failed for:", cleanText);
+        return { transcription: "Error parsing transcript.", summary: "Data corrupted. Try again.", conclusions: [], actionItems: [] };
     }
 }
