@@ -127,15 +127,13 @@ const Header: React.FC<HeaderProps> = ({
                      <span className="hidden sm:inline text-xs font-bold">Profile</span>
                    </button>
                 ) : (
-                  <div className="flex items-center gap-2">
-                    <div id="google-signin-btn" className="scale-90 md:scale-100 min-w-[120px]"></div>
-                    <button 
-                      onClick={onLogin}
-                      className="sm:hidden flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white rounded-full text-xs font-bold"
-                    >
-                      <LogIn className="w-3 h-3" /> Sign In
-                    </button>
-                  </div>
+                  <button 
+                    onClick={onLogin}
+                    className="flex items-center gap-2 px-4 py-1.5 bg-blue-600 text-white rounded-full text-xs md:text-sm font-bold shadow-md hover:bg-blue-700 transition-all"
+                  >
+                    <LogIn className="w-4 h-4" />
+                    <span>Sign In</span>
+                  </button>
                 )}
             </div>
         </div>
