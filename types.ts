@@ -21,7 +21,7 @@ export type GeminiModel =
   | 'gemini-2.5-flash-lite-latest';
 
 // 5 hours in seconds (5 * 60 * 60)
-export const FREE_LIMIT_SECONDS = 10;
+export const FREE_LIMIT_SECONDS = 20;
 
 export interface MeetingData {
   transcription: string;
