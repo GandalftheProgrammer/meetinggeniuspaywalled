@@ -31,6 +31,7 @@ const App: React.FC = () => {
   const [isDriveConnected, setIsDriveConnected] = useState(false);
   const [debugLogs, setDebugLogs] = useState<string[]>([]);
   const [sessionStartTime, setSessionStartTime] = useState<Date | null>(null);
+  const authInitializedRef = useRef(false);
 
   const addLog = (msg: string) => {
     setDebugLogs(prev => [...prev, `${new Date().toLocaleTimeString('en-GB')} - ${msg}`]);
@@ -56,64 +57,68 @@ const App: React.FC = () => {
       setUser(profile);
     } catch (err) {
       console.error("Auth profile error:", err);
-      setError("Failed to load user profile.");
+      setError("Failed to load user profile. Please try again.");
     }
   };
 
   useEffect(() => {
-    const initAuth = () => {
-      // Access client ID via import.meta.env
-      // Fix: Cast import.meta to any to avoid TypeScript error 'env' does not exist on type 'ImportMeta'
-      const CLIENT_ID = (import.meta as any).env.VITE_GOOGLE_CLIENT_ID;
+    const checkAndInit = () => {
+      if (authInitializedRef.current) return true;
+
+      // Access client ID - checking multiple possible locations for robustness
+      const CLIENT_ID = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID || (window as any).VITE_GOOGLE_CLIENT_ID;
       
-      if ((window as any).google && CLIENT_ID) {
+      if (!CLIENT_ID) {
+        console.warn("VITE_GOOGLE_CLIENT_ID is missing. Sign-in will not work until this is set in Netlify.");
+        return false;
+      }
+
+      if (!(window as any).google?.accounts?.id) {
+        return false;
+      }
+
+      try {
         google.accounts.id.initialize({
           client_id: CLIENT_ID,
           callback: handleCredentialResponse,
           auto_select: true,
-          itp_support: true
+          itp_support: true,
+          ux_mode: 'popup'
         });
-        
-        // Show One Tap prompt
-        google.accounts.id.prompt();
-        
-        // Render the standard button if the container exists
+
         const btnContainer = document.getElementById('google-signin-btn');
         if (btnContainer) {
           google.accounts.id.renderButton(btnContainer, {
             theme: 'outline',
             size: 'large',
-            shape: 'pill'
+            shape: 'pill',
+            text: 'signin_with',
+            logo_alignment: 'left'
           });
         }
-      } else if (!CLIENT_ID) {
-        console.warn("VITE_GOOGLE_CLIENT_ID not found. Ensure it is set in Netlify.");
+
+        // Only show One Tap prompt if user is not logged in
+        if (!user) {
+          google.accounts.id.prompt();
+        }
+
+        authInitializedRef.current = true;
+        addLog("Google Auth initialized.");
+        return true;
+      } catch (e) {
+        console.error("Failed to initialize Google Auth", e);
+        return false;
       }
     };
 
-    // Wait for the script to be ready
-    if ((window as any).google) {
-      initAuth();
-    } else {
-      const script = document.querySelector('script[src*="gsi/client"]');
-      if (script) {
-        script.addEventListener('load', initAuth);
-      }
+    // Run check immediately and then on interval until successful
+    if (!checkAndInit()) {
+      const interval = setInterval(() => {
+        if (checkAndInit()) clearInterval(interval);
+      }, 1000);
+      return () => clearInterval(interval);
     }
-
-    const timer = setTimeout(() => {
-      initDrive((token) => {
-          if (token) {
-              setIsDriveConnected(true);
-              addLog("Drive link active.");
-          } else {
-              setIsDriveConnected(false);
-          }
-      });
-    }, 500);
-
-    return () => clearTimeout(timer);
-  }, []);
+  }, [user]);
 
   const handleUpgrade = async () => {
     if (!user) { handleLogin(); return; }
@@ -137,10 +142,17 @@ const App: React.FC = () => {
   };
 
   const handleLogin = () => {
-    if ((window as any).google) {
-      google.accounts.id.prompt();
+    if ((window as any).google?.accounts?.id) {
+      addLog("Manual login triggered.");
+      google.accounts.id.prompt((notification: any) => {
+        if (notification.isNotDisplayed()) {
+          addLog("One Tap hidden, please use the Google button in the header.");
+          // Fallback: If prompt is hidden, we might need to show a manual sign-in button or dialog
+          alert("Gebruik de 'Sign in with Google' knop rechtsboven in de balk.");
+        }
+      });
     } else {
-      alert("Inlogservice wordt geladen, een moment geduld...");
+      alert("De inlogservice is nog aan het laden. Een moment geduld...");
     }
   };
 
@@ -148,6 +160,7 @@ const App: React.FC = () => {
     setUser(null);
     disconnectDrive();
     setIsDriveConnected(false);
+    authInitializedRef.current = false; // Reset to allow re-init/re-render
     addLog("Logged out.");
   };
 
