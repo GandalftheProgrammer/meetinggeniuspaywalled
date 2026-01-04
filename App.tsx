@@ -65,9 +65,9 @@ const App: React.FC = () => {
       localStorage.setItem('mg_drive_email_hint', email);
       
       // AUTO-CONNECT AFTER LOGIN:
-      // If the user's preference (intent) is to be connected, trigger the smart flow.
+      // Always try the silent connection flow first.
       if (localStorage.getItem('mg_drive_intent') === 'true' && !getAccessToken()) {
-        connectToDrive(email, true);
+        connectToDrive(email);
       }
     } catch (err) { console.error("Profile sync error:", err); } 
     finally { setIsInitialLoading(false); }
@@ -146,8 +146,8 @@ const App: React.FC = () => {
     setIsGoogleBusy(true);
     setTimeout(() => setIsGoogleBusy(false), 2000);
     
-    // Manual click always starts the smart flow (silent first, then popup)
-    connectToDrive(user?.email, true);
+    // Always triggers the silent-first flow
+    connectToDrive(user?.email);
   };
 
   const handleDisconnectDriveOnly = () => {
@@ -159,7 +159,7 @@ const App: React.FC = () => {
   const handleLogout = () => {
     if ((window as any).google?.accounts?.id) google.accounts.id.disableAutoSelect();
     setUser(null);
-    disconnectDrive(false); // keep intent so we can auto-reconnect on next login
+    disconnectDrive(false); 
     setIsDriveConnected(false);
     localStorage.removeItem('mg_logged_in');
     localStorage.removeItem('mg_user_profile');

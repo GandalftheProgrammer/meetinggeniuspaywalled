@@ -10,9 +10,8 @@ let folderLock: Promise<string> | null = null;
 const subFolderCache: Record<string, string> = {};
 let globalStatusCallback: ((token: string | null) => void) | null = null;
 
-// Persistent state for the smart flow
-let isSilentMode = false;
-let lastEmailHint: string | undefined = undefined;
+// Track if we are currently in an escalation flow to prevent loops
+let isEscalating = false;
 
 /**
  * Returns the current access token if available.
@@ -20,7 +19,7 @@ let lastEmailHint: string | undefined = undefined;
 export const getAccessToken = () => accessToken;
 
 /**
- * Initializes the Drive token client with smart fallback logic.
+ * Initializes the Drive token client.
  */
 export const initDrive = (callback: (token: string | null) => void) => {
   if (typeof google === 'undefined' || !google.accounts?.oauth2) return;
@@ -37,23 +36,32 @@ export const initDrive = (callback: (token: string | null) => void) => {
     scope: 'https://www.googleapis.com/auth/drive.file',
     callback: (tokenResponse: any) => {
       if (tokenResponse.access_token) {
+        // Success!
+        isEscalating = false;
         accessToken = tokenResponse.access_token;
         localStorage.setItem('drive_token', accessToken);
         localStorage.setItem('drive_token_expiry', (Date.now() + tokenResponse.expires_in * 1000).toString());
         if (globalStatusCallback) globalStatusCallback(accessToken);
-      } else if (tokenResponse.error === 'interaction_required' && isSilentMode) {
-        // AUTO-FALLBACK: Silent failed, so we MUST show the popup now to satisfy the user's intent.
-        isSilentMode = false;
-        tokenClient.requestAccessToken({ hint: lastEmailHint, prompt: '' });
+      } else if (tokenResponse.error === 'interaction_required') {
+        // ESCALATION: Silent failed, so we MUST show the popup now.
+        // We only do this if we aren't already in the middle of an escalation.
+        if (!isEscalating) {
+          isEscalating = true;
+          tokenClient.requestAccessToken({ 
+            hint: localStorage.getItem('mg_drive_email_hint') || undefined, 
+            prompt: '' 
+          });
+        }
       } else {
-        // Hard failure or user cancelled the popup
+        // Other errors or user closed the popup
+        isEscalating = false;
         accessToken = null;
         if (globalStatusCallback) globalStatusCallback(null);
       }
     },
   });
 
-  // Handle Page Refresh: Check storage
+  // Handle Page Refresh: Check storage first
   const storedToken = localStorage.getItem('drive_token');
   const expiry = localStorage.getItem('drive_token_expiry');
   
@@ -61,41 +69,41 @@ export const initDrive = (callback: (token: string | null) => void) => {
     accessToken = storedToken;
     callback(storedToken);
   } else if (localStorage.getItem('mg_drive_intent') === 'true') {
-    // No token, but user wants to be connected. Start the smart flow.
-    connectToDrive(localStorage.getItem('mg_drive_email_hint') || undefined, true);
+    // No valid token, but user wants to be connected. Start the silent-first flow.
+    connectToDrive(localStorage.getItem('mg_drive_email_hint') || undefined);
   } else {
     callback(null);
   }
 };
 
 /**
- * Smart connection flow. Tries silent first, then popup.
- * @param emailHint User's email to speed up Google's selection.
- * @param silent If true, starts without a popup.
+ * Connection flow. Always tries silent first. 
+ * The callback handles escalation to popup if prompt:'none' fails.
  */
-export const connectToDrive = (emailHint?: string, silent: boolean = false) => {
+export const connectToDrive = (emailHint?: string) => {
   if (!tokenClient) return;
   
-  isSilentMode = silent;
-  lastEmailHint = emailHint || localStorage.getItem('mg_drive_email_hint') || undefined;
+  const hint = emailHint || localStorage.getItem('mg_drive_email_hint') || undefined;
   
-  // Set intent if this is a manual or initial login trigger
+  // Set intent and hint for future auto-connects
   localStorage.setItem('mg_drive_intent', 'true');
-  if (lastEmailHint) localStorage.setItem('mg_drive_email_hint', lastEmailHint);
+  if (hint) localStorage.setItem('mg_drive_email_hint', hint);
 
+  isEscalating = false; // Reset state for a new request chain
   tokenClient.requestAccessToken({
-    hint: lastEmailHint,
-    prompt: silent ? 'none' : '' 
+    hint: hint,
+    prompt: 'none' 
   });
 };
 
 /**
  * Ensures a valid token is available before a cloud task.
+ * Uses the same silent-first escalation logic.
  */
-export const ensureValidToken = async (emailHint?: string): Promise<string | null> => {
+export const ensureValidToken = async (): Promise<string | null> => {
   const expiry = localStorage.getItem('drive_token_expiry');
   const storedToken = localStorage.getItem('drive_token');
-  const isExpired = !expiry || Date.now() > (parseInt(expiry) - 300000); 
+  const isExpired = !expiry || Date.now() > (parseInt(expiry) - 30000); 
 
   if (!isExpired && storedToken) {
     accessToken = storedToken;
@@ -105,6 +113,7 @@ export const ensureValidToken = async (emailHint?: string): Promise<string | nul
   if (!tokenClient) return null;
 
   return new Promise((resolve) => {
+    // Temporarily swap the callback to resolve this promise
     const originalCallback = tokenClient.callback;
     
     tokenClient.callback = (response: any) => {
@@ -113,23 +122,22 @@ export const ensureValidToken = async (emailHint?: string): Promise<string | nul
           localStorage.setItem('drive_token', accessToken);
           localStorage.setItem('drive_token_expiry', (Date.now() + response.expires_in * 1000).toString());
           if (globalStatusCallback) globalStatusCallback(accessToken);
-          tokenClient.callback = originalCallback; // Restore
+          tokenClient.callback = originalCallback; 
           resolve(accessToken);
-      } else if (response.error === 'interaction_required' && isSilentMode) {
-          isSilentMode = false;
+      } else if (response.error === 'interaction_required') {
+          // Escalation is handled by the manual call below to keep logic clean
           tokenClient.requestAccessToken({ 
-              hint: emailHint || localStorage.getItem('mg_drive_email_hint') || undefined, 
+              hint: localStorage.getItem('mg_drive_email_hint') || undefined, 
               prompt: '' 
           });
       } else {
-          tokenClient.callback = originalCallback; // Restore
+          tokenClient.callback = originalCallback;
           resolve(null);
       }
     };
     
-    isSilentMode = true;
     tokenClient.requestAccessToken({ 
-      hint: emailHint || localStorage.getItem('mg_drive_email_hint') || undefined, 
+      hint: localStorage.getItem('mg_drive_email_hint') || undefined, 
       prompt: 'none' 
     });
   });
@@ -153,6 +161,8 @@ export const disconnectDrive = (clearIntent: boolean = true) => {
   
   if (globalStatusCallback) globalStatusCallback(null);
 };
+
+// --- Helper Functions for Drive operations remain unchanged ---
 
 const getFolderId = async (token: string, name: string, parentId?: string): Promise<string | null> => {
   let q = `mimeType='application/vnd.google-apps.folder' and name='${name}' and trashed=false`;
