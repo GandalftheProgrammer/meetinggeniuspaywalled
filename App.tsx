@@ -8,7 +8,7 @@ import PrivacyPolicy from './components/PrivacyPolicy';
 import TermsOfService from './components/TermsOfService';
 import { AppState, MeetingData, ProcessingMode, GeminiModel, UserProfile } from './types';
 import { processMeetingAudio } from './services/geminiService';
-import { initDrive, connectToDrive, uploadAudioToDrive, uploadTextToDrive, disconnectDrive, ensureValidToken } from './services/driveService';
+import { initDrive, connectToDrive, uploadAudioToDrive, uploadTextToDrive, disconnectDrive, ensureValidToken, getAccessToken } from './services/driveService';
 import { saveChunkToDB, deleteSessionData } from './services/db';
 import { Zap, Shield, Cloud, Loader2 } from 'lucide-react';
 
@@ -79,10 +79,16 @@ const App: React.FC = () => {
       setUser(profile);
       localStorage.setItem('mg_user_profile', JSON.stringify(profile));
       localStorage.setItem('mg_logged_in', 'true');
+      localStorage.setItem('mg_drive_email_hint', email); // Keep hint updated
       
-      // Auto-reconnect Drive SILENTLY if it was previously active
-      if (localStorage.getItem('drive_sticky_connection') === 'true') {
-        connectToDrive(email, true); // true = silent, NO popup
+      // Drive Intent Persistence logic
+      const intent = localStorage.getItem('mg_drive_intent') === 'true';
+      const hasToken = !!getAccessToken();
+
+      // If the user's intent is to be connected, attempt a silent background reconnect
+      if (intent && !hasToken) {
+        console.log("Drive intent detected. Attempting background connection...");
+        connectToDrive(email, true); // true = silent refresh first
       }
     } catch (err) {
       console.error("Profile sync error:", err);
@@ -180,12 +186,19 @@ const App: React.FC = () => {
     if (isGoogleBusy) return;
     setIsGoogleBusy(true);
     setTimeout(() => setIsGoogleBusy(false), 2000);
-    // User manual click = NOT silent (popup allowed if needed)
+    
+    // Set the intent flag so we know the user wants this connection across refreshes
+    localStorage.setItem('mg_drive_intent', 'true');
+    if (user) localStorage.setItem('mg_drive_email_hint', user.email);
+
+    // Initial manual connection is NEVER silent to ensure the user can grant permission
     connectToDrive(user?.email, false);
   };
 
   const handleDisconnectDriveOnly = () => {
-    disconnectDrive();
+    // Explicitly clearing the intent as the user clicked "Disconnect"
+    localStorage.setItem('mg_drive_intent', 'false');
+    disconnectDrive(true); // true = full cleanup of tokens and intent hints
     setIsDriveConnected(false);
     addLog("Disconnected from Google Drive.");
   };
@@ -194,12 +207,13 @@ const App: React.FC = () => {
     if ((window as any).google?.accounts?.id) {
       google.accounts.id.disableAutoSelect();
     }
+    // Note: We do NOT clear mg_drive_intent here so it's remembered for the next sign-in.
+    // We only disconnect the active session tokens.
     setUser(null);
-    disconnectDrive();
+    disconnectDrive(false); // false = keep the intent flag so next login auto-reconnects
     setIsDriveConnected(false);
     localStorage.removeItem('mg_logged_in');
     localStorage.removeItem('mg_user_profile');
-    localStorage.removeItem('drive_sticky_connection');
     addLog("Logged out.");
   };
 

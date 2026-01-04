@@ -10,11 +10,21 @@ let folderLock: Promise<string> | null = null;
 const subFolderCache: Record<string, string> = {};
 let globalStatusCallback: ((token: string | null) => void) | null = null;
 
+// Track if we are currently performing a silent attempt to handle fallbacks correctly
+let isSilentAttempt = false;
+let currentEmailHint: string | undefined = undefined;
+
+/**
+ * Returns the current access token if available.
+ */
+export const getAccessToken = () => accessToken;
+
 /**
  * Initializes the Drive token client.
  */
 export const initDrive = (callback: (token: string | null) => void) => {
   if (typeof google === 'undefined' || !google.accounts?.oauth2) return;
+  if (tokenClient) return;
 
   const env = (import.meta as any).env;
   const clientId = env?.VITE_GOOGLE_CLIENT_ID;
@@ -30,18 +40,28 @@ export const initDrive = (callback: (token: string | null) => void) => {
         accessToken = tokenResponse.access_token;
         localStorage.setItem('drive_token', accessToken);
         localStorage.setItem('drive_token_expiry', (Date.now() + tokenResponse.expires_in * 1000).toString());
-        localStorage.setItem('drive_sticky_connection', 'true');
         if (globalStatusCallback) globalStatusCallback(accessToken);
       } else if (tokenResponse.error) {
-        console.warn("Drive silent connect status:", tokenResponse.error);
-        // If silent refresh fails (e.g. interaction_required), we just stop trying.
-        // We do NOT show a popup here.
+        console.warn("Drive connection attempt result:", tokenResponse.error);
+        
+        // Phase 2 Fallback: If silent refresh fails with 'interaction_required', 
+        // and we have the intent to be connected, trigger the interactive popup.
+        if (isSilentAttempt && tokenResponse.error === 'interaction_required') {
+          const intent = localStorage.getItem('mg_drive_intent') === 'true';
+          if (intent) {
+            console.log("Interaction required for Drive. Opening popup...");
+            isSilentAttempt = false;
+            connectToDrive(currentEmailHint, false);
+            return;
+          }
+        }
+        
         if (globalStatusCallback) globalStatusCallback(null);
       }
     },
   });
 
-  // Check cache for existing valid token
+  // Basic cache check for page refresh
   const storedToken = localStorage.getItem('drive_token');
   const expiry = localStorage.getItem('drive_token_expiry');
   
@@ -49,28 +69,31 @@ export const initDrive = (callback: (token: string | null) => void) => {
     accessToken = storedToken;
     callback(storedToken);
   } else {
-    // We don't have a valid token. If we had a sticky connection, 
-    // App.tsx will trigger a silent reconnect once the user email is available.
     callback(null);
   }
 };
 
 /**
- * Connect to drive. 
- * @param emailHint Mandatory for silent refresh to work without popups.
- * @param silent If true, strictly use prompt: 'none'.
+ * Connect to drive using the persistent intent logic.
+ * @param emailHint Optional email for hint.
+ * @param silent If true, tries background refresh first.
  */
 export const connectToDrive = (emailHint?: string, silent: boolean = false) => {
   if (!tokenClient) return;
   
-  const hint = emailHint || localStorage.getItem('drive_email_hint');
-  if (hint) {
-    localStorage.setItem('drive_email_hint', hint);
+  // Prevent unnecessary requests if we already have a valid token
+  const expiry = localStorage.getItem('drive_token_expiry');
+  if (accessToken && expiry && Date.now() < (parseInt(expiry) - 60000)) {
+    if (globalStatusCallback) globalStatusCallback(accessToken);
+    return;
   }
 
+  isSilentAttempt = silent;
+  currentEmailHint = emailHint || localStorage.getItem('mg_drive_email_hint') || undefined;
+
   const requestConfig: any = {
-    hint: hint,
-    prompt: silent ? 'none' : '' // Empty string allows Google to decide if a popup is needed for consent
+    hint: currentEmailHint,
+    prompt: silent ? 'none' : '' 
   };
 
   try {
@@ -93,28 +116,35 @@ export const ensureValidToken = async (emailHint?: string): Promise<string | nul
   return new Promise((resolve) => {
     const originalCallback = tokenClient.callback;
     tokenClient.callback = (response: any) => {
-      tokenClient.callback = originalCallback; // Restore original
+      tokenClient.callback = originalCallback; 
       if (originalCallback) originalCallback(response);
       resolve(response.access_token || null);
     };
     
-    // For background tasks, always try silent first
     tokenClient.requestAccessToken({ 
-      hint: emailHint || localStorage.getItem('drive_email_hint'), 
+      hint: emailHint || localStorage.getItem('mg_drive_email_hint') || undefined, 
       prompt: 'none' 
     });
   });
 };
 
-export const disconnectDrive = () => {
+/**
+ * Disconnects drive.
+ * @param clearIntent If true, completely clears the user's preference for Drive.
+ */
+export const disconnectDrive = (clearIntent: boolean = true) => {
   accessToken = null;
   mainFolderId = null;
   folderLock = null;
   Object.keys(subFolderCache).forEach(k => delete subFolderCache[k]);
   localStorage.removeItem('drive_token');
   localStorage.removeItem('drive_token_expiry');
-  localStorage.removeItem('drive_sticky_connection');
-  localStorage.removeItem('drive_email_hint');
+  
+  if (clearIntent) {
+      localStorage.removeItem('mg_drive_intent');
+      localStorage.removeItem('mg_drive_email_hint');
+  }
+  
   if (globalStatusCallback) globalStatusCallback(null);
 };
 
