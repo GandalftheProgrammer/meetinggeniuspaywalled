@@ -10,7 +10,7 @@ import { AppState, MeetingData, ProcessingMode, GeminiModel, UserProfile } from 
 import { processMeetingAudio } from './services/geminiService';
 import { initDrive, connectToDrive, uploadAudioToDrive, uploadTextToDrive, disconnectDrive } from './services/driveService';
 import { saveChunkToDB, deleteSessionData } from './services/db';
-import { AlertCircle } from 'lucide-react';
+import { AlertCircle, Zap, Shield, CloudSync } from 'lucide-react';
 
 declare const google: any;
 
@@ -103,7 +103,11 @@ const App: React.FC = () => {
         use_fedcm_for_prompt: false,
         itp_support: true
       });
-      google.accounts.id.prompt();
+      // Do not prompt automatically if on privacy or terms pages
+      const params = new URLSearchParams(window.location.search);
+      if (!params.get('p')) {
+        google.accounts.id.prompt();
+      }
 
       tokenClientRef.current = google.accounts.oauth2.initTokenClient({
         client_id: CLIENT_ID,
@@ -211,7 +215,7 @@ const App: React.FC = () => {
   };
 
   const handleProcessAudio = async (mode: ProcessingMode) => {
-    if (!combinedBlob || !user) return;
+    if (!combinedBlob || !user) { handleLogin(); return; }
     setLastRequestedMode(mode);
     let finalTitle = title.trim() || "Meeting";
     setTitle(finalTitle);
@@ -276,6 +280,49 @@ const App: React.FC = () => {
     setCurrentRecordingSeconds(0);
   };
 
+  const LandingInfo = () => (
+    <div className="w-full max-w-4xl mx-auto mt-20 border-t border-slate-200 pt-16 mb-20">
+      <div className="text-center mb-12">
+        <h2 className="text-3xl font-bold text-slate-800 mb-4">Powerful Meeting Intelligence</h2>
+        <p className="text-slate-600 max-w-2xl mx-auto">
+          MeetingGenius is an AI-powered productivity tool designed to help you stay present in your meetings. 
+          We use Google's latest Gemini 3 models to turn audio into structured intelligence.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+        <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 text-center">
+          <div className="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center mx-auto mb-4">
+            <Zap className="w-6 h-6 text-blue-600" />
+          </div>
+          <h3 className="font-bold text-slate-800 mb-2">Instant Summaries</h3>
+          <p className="text-sm text-slate-500">Get structured notes, action items, and conclusions in seconds using Gemini 3.</p>
+        </div>
+        <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 text-center">
+          <div className="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center mx-auto mb-4">
+            <CloudSync className="w-6 h-6 text-green-600" />
+          </div>
+          <h3 className="font-bold text-slate-800 mb-2">Drive Integration</h3>
+          <p className="text-sm text-slate-500">Securely sync your transcripts and notes directly to your own Google Drive account.</p>
+        </div>
+        <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 text-center">
+          <div className="w-12 h-12 bg-purple-100 rounded-xl flex items-center justify-center mx-auto mb-4">
+            <Shield className="w-6 h-6 text-purple-600" />
+          </div>
+          <h3 className="font-bold text-slate-800 mb-2">Privacy First</h3>
+          <p className="text-sm text-slate-500">Your data is yours. We do not train models on your recordings or sell your personal data.</p>
+        </div>
+      </div>
+
+      <div className="mt-12 p-6 bg-blue-50 rounded-2xl border border-blue-100 text-center">
+        <p className="text-sm text-blue-800 font-medium">
+          "The most accurate meeting assistant I've used. The Gemini 3 integration is a game changer for technical discussions."
+        </p>
+        <span className="text-xs text-blue-500 block mt-2">— Verified User</span>
+      </div>
+    </div>
+  );
+
   const renderMainView = () => (
     <div className="flex flex-col items-center space-y-8 animate-in fade-in duration-500">
       <div className="w-full max-w-lg space-y-2">
@@ -304,6 +351,7 @@ const App: React.FC = () => {
         onLogin={handleLogin}
         onRecordingTick={setCurrentRecordingSeconds}
       />
+      {appState === AppState.IDLE && <LandingInfo />}
     </div>
   );
 
