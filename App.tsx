@@ -47,6 +47,15 @@ const App: React.FC = () => {
   const handleNavigate = (newView: View) => {
     setView(newView);
     window.scrollTo({ top: 0, behavior: 'smooth' });
+    
+    // Update URL without reloading to look professional
+    const url = new URL(window.location.href);
+    if (newView === 'main') {
+      url.searchParams.delete('p');
+    } else {
+      url.searchParams.set('p', newView);
+    }
+    window.history.pushState({}, '', url);
   };
 
   const formatMeetingDateTime = (date: Date) => {
@@ -66,11 +75,6 @@ const App: React.FC = () => {
       const profile = await res.json();
       setUser(profile);
       addLog(`User profile synced: ${email}`);
-      
-      const urlParams = new URLSearchParams(window.location.search);
-      if (urlParams.has('session_id')) {
-        window.history.replaceState({}, document.title, window.location.pathname);
-      }
     } catch (err) {
       console.error("Auth profile error:", err);
       setError("Failed to load user profile. Check your connection.");
@@ -78,6 +82,12 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
+    // Check for deep links on load (e.g. ?p=privacy)
+    const params = new URLSearchParams(window.location.search);
+    const page = params.get('p');
+    if (page === 'privacy') setView('privacy');
+    if (page === 'terms') setView('terms');
+
     const handleCredentialResponse = async (response: any) => {
       const decoded = JSON.parse(atob(response.credential.split('.')[1]));
       fetchUserProfile(decoded.email, decoded.sub);
