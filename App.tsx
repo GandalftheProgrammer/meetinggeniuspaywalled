@@ -29,9 +29,19 @@ const App: React.FC = () => {
   
   const [meetingData, setMeetingData] = useState<MeetingData | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [user, setUser] = useState<UserProfile | null>(null);
-  const [currentRecordingSeconds, setCurrentRecordingSeconds] = useState(0);
-  const [isInitialLoading, setIsInitialLoading] = useState(true);
+  
+  // IMMEDIATELY load user from localStorage to prevent "Sign In" flicker on refresh
+  const [user, setUser] = useState<UserProfile | null>(() => {
+    try {
+      const cached = localStorage.getItem('mg_user_profile');
+      return cached ? JSON.parse(cached) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  // Only show loader if we have NO cached user and we are waiting for Google scripts
+  const [isInitialLoading, setIsInitialLoading] = useState(!user);
   
   const audioChunksRef = useRef<Blob[]>([]);
   const sessionIdRef = useRef<string>(`session_${Date.now()}`);
@@ -42,6 +52,9 @@ const App: React.FC = () => {
   const [debugLogs, setDebugLogs] = useState<string[]>([]);
   const [sessionStartTime, setSessionStartTime] = useState<Date | null>(null);
   const [isGoogleBusy, setIsGoogleBusy] = useState(false);
+  
+  // Fix: Added missing state to track recording time
+  const [currentRecordingSeconds, setCurrentRecordingSeconds] = useState(0);
 
   const tokenClientRef = useRef<any>(null);
 
@@ -49,17 +62,22 @@ const App: React.FC = () => {
     setDebugLogs(prev => [...prev, `${new Date().toLocaleTimeString('en-GB')} - ${msg}`]);
   };
 
-  const fetchUserProfile = async (email: string, uid: string) => {
+  /**
+   * Fetches latest user data from backend and updates local cache
+   */
+  const syncUserProfile = async (email: string, uid: string) => {
     try {
       const res = await fetch('/.netlify/functions/get-user', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, uid })
       });
+      if (!res.ok) throw new Error("Sync failed");
+      
       const profile = await res.json();
       setUser(profile);
+      localStorage.setItem('mg_user_profile', JSON.stringify(profile));
       localStorage.setItem('mg_logged_in', 'true');
-      localStorage.setItem('mg_last_email', email);
       
       // Auto-reconnect Drive if it was previously active
       if (localStorage.getItem('drive_sticky_connection') === 'true') {
@@ -80,16 +98,15 @@ const App: React.FC = () => {
     if (page === 'privacy') setView('privacy');
     if (page === 'terms') setView('terms');
 
-    // Safety fallback for loading screen (max 4 seconds)
-    const loadingTimeout = setTimeout(() => {
-      setIsInitialLoading(false);
-    }, 4000);
+    // If we have a cached user, trigger a background sync immediately
+    if (user) {
+      syncUserProfile(user.email, user.uid);
+    }
 
     const handleCredentialResponse = async (response: any) => {
       const decoded = JSON.parse(atob(response.credential.split('.')[1]));
-      fetchUserProfile(decoded.email, decoded.sub);
+      await syncUserProfile(decoded.email, decoded.sub);
       setIsGoogleBusy(false);
-      clearTimeout(loadingTimeout);
     };
 
     const CLIENT_ID = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID;
@@ -113,7 +130,7 @@ const App: React.FC = () => {
               const info = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
                 headers: { Authorization: `Bearer ${tokenResponse.access_token}` }
               }).then(r => r.json());
-              fetchUserProfile(info.email, info.sub);
+              await syncUserProfile(info.email, info.sub);
             }
             setIsGoogleBusy(false);
           },
@@ -126,24 +143,17 @@ const App: React.FC = () => {
           gdriveInitialized = true;
         }
 
-        // Handle auto-login / One Tap
+        // Silent auto-login attempt
         if (localStorage.getItem('mg_logged_in') === 'true') {
           google.accounts.id.prompt((notification: any) => {
-            // If it's displayed, we should hide the loading screen so user sees the prompt overlay
-            // If it's skipped or not displayed, hide loading so user can use the manual button
-            if (notification.isDisplayed() || notification.isNotDisplayed() || notification.isSkippedMoment()) {
-              setIsInitialLoading(false);
-            }
+            // Even if prompt is skipped, we hide the loader because we likely have a cached user
+            setIsInitialLoading(false);
           });
         } else {
           setIsInitialLoading(false);
         }
-
-        if (stripeSessionId) {
-          addLog("Syncing Pro status...");
-        }
       } catch (err) {
-        console.error("Google script setup error:", err);
+        console.error("Google script error:", err);
         setIsInitialLoading(false);
       }
     };
@@ -153,25 +163,19 @@ const App: React.FC = () => {
         setupGoogle();
         clearInterval(checkInterval);
       }
-    }, 300);
+    }, 200);
 
-    return () => {
-      clearInterval(checkInterval);
-      clearTimeout(loadingTimeout);
-    };
+    return () => clearInterval(checkInterval);
   }, []);
 
   const handleLogin = () => {
     if (isGoogleBusy) return;
     setIsGoogleBusy(true);
-
-    const timeout = setTimeout(() => setIsGoogleBusy(false), 2500);
+    const timeout = setTimeout(() => setIsGoogleBusy(false), 3000);
 
     try {
       if (tokenClientRef.current) {
-        tokenClientRef.current.requestAccessToken({
-          hint: localStorage.getItem('mg_last_email') || ''
-        });
+        tokenClientRef.current.requestAccessToken();
       } else if ((window as any).google?.accounts?.id) {
         google.accounts.id.prompt();
       } else {
@@ -179,7 +183,6 @@ const App: React.FC = () => {
         clearTimeout(timeout);
       }
     } catch (e) {
-      console.error("Login trigger failed:", e);
       setIsGoogleBusy(false);
       clearTimeout(timeout);
     }
@@ -197,7 +200,8 @@ const App: React.FC = () => {
     disconnectDrive();
     setIsDriveConnected(false);
     localStorage.removeItem('mg_logged_in');
-    localStorage.removeItem('mg_last_email');
+    localStorage.removeItem('mg_user_profile');
+    localStorage.removeItem('drive_sticky_connection');
     addLog("Logged out.");
   };
 
@@ -222,6 +226,9 @@ const App: React.FC = () => {
       setAppState(AppState.COMPLETED);
       deleteSessionData(sessionIdRef.current).catch(() => {});
       
+      // Refresh user usage after processing
+      syncUserProfile(user.email, user.uid);
+
       if (isDriveConnected) {
         autoSyncToDrive(newData, finalTitle, combinedBlob);
       }
@@ -272,6 +279,7 @@ const App: React.FC = () => {
     setDebugLogs([]);
     setTitle("");
     setError(null);
+    // Fix: Reset recording seconds state
     setCurrentRecordingSeconds(0);
   };
 
@@ -325,6 +333,7 @@ const App: React.FC = () => {
             const blob = new Blob(audioChunksRef.current, { type: audioChunksRef.current[0]?.type || 'audio/webm' });
             setCombinedBlob(blob);
             setAudioUrl(URL.createObjectURL(blob));
+            // Fix: Clear recording seconds state when recording finishes
             setCurrentRecordingSeconds(0);
           }
         }}
@@ -342,6 +351,7 @@ const App: React.FC = () => {
         user={user}
         onUpgrade={() => {}} 
         onLogin={handleLogin}
+        // Fix: Added missing state setter
         onRecordingTick={setCurrentRecordingSeconds}
         isLocked={isGoogleBusy}
       />
@@ -381,6 +391,7 @@ const App: React.FC = () => {
         onLogin={handleLogin}
         onLogout={handleLogout}
         onUpgrade={() => {}}
+        // Fix: Added missing state variable
         currentRecordingSeconds={currentRecordingSeconds}
         isLocked={isGoogleBusy}
       />

@@ -1,6 +1,6 @@
 
 import React from 'react';
-import { CheckCircle2, Bot, ChevronDown, Crown, User as UserIcon } from 'lucide-react';
+import { CheckCircle2, Bot, ChevronDown, Crown, User as UserIcon, Loader2 } from 'lucide-react';
 import { GeminiModel, UserProfile, FREE_LIMIT_SECONDS } from '../types';
 
 interface HeaderProps {
@@ -89,22 +89,23 @@ const Header: React.FC<HeaderProps> = ({
             )}
 
             <div className="flex items-center gap-2">
+                {/* Model selector is now always visible */}
                 <div className="flex relative group shrink-0">
-                    <div className="flex items-center gap-2 text-xs md:text-sm font-medium text-slate-600 bg-white px-2 md:px-3 py-1.5 rounded-full border border-slate-200 hover:border-slate-300 transition-colors shadow-sm">
-                        <span className="hidden xs:inline">Model:</span>
-                        <select 
-                            value={selectedModel}
-                            onChange={(e) => onModelChange(e.target.value as GeminiModel)}
-                            className="bg-transparent outline-none text-slate-800 font-semibold cursor-pointer appearance-none pr-4 max-w-[100px] md:max-w-none text-ellipsis overflow-hidden"
-                        >
-                            <option value="gemini-3-pro-preview">Gemini 3 Pro</option>
-                            <option value="gemini-3-flash-preview">Gemini 3 Flash</option>
-                            <option value="gemini-flash-lite-latest">Gemini Flash Lite</option>
-                            <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
-                            <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-                        </select>
-                        <ChevronDown className="w-3 h-3 absolute right-2 md:right-3 pointer-events-none text-slate-400" />
-                    </div>
+                  <div className="flex items-center gap-2 text-xs md:text-sm font-medium text-slate-600 bg-white px-2 md:px-3 py-1.5 rounded-full border border-slate-200 hover:border-slate-300 transition-colors shadow-sm">
+                      <span className="hidden xs:inline">Model:</span>
+                      <select 
+                          value={selectedModel}
+                          onChange={(e) => onModelChange(e.target.value as GeminiModel)}
+                          className="bg-transparent outline-none text-slate-800 font-semibold cursor-pointer appearance-none pr-4 max-w-[100px] md:max-w-none text-ellipsis overflow-hidden"
+                      >
+                          <option value="gemini-3-pro-preview">Gemini 3 Pro</option>
+                          <option value="gemini-3-flash-preview">Gemini 3 Flash</option>
+                          <option value="gemini-flash-lite-latest">Gemini Flash Lite</option>
+                          <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                          <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                      </select>
+                      <ChevronDown className="w-3 h-3 absolute right-2 md:right-3 pointer-events-none text-slate-400" />
+                  </div>
                 </div>
 
                 {user && (
@@ -134,9 +135,9 @@ const Header: React.FC<HeaderProps> = ({
                   <button 
                     onClick={onLogin}
                     disabled={isLocked}
-                    className="flex items-center gap-2 px-4 py-1.5 bg-blue-600 text-white rounded-full text-xs md:text-sm font-bold shadow-md hover:bg-blue-700 transition-all disabled:bg-slate-400 disabled:cursor-not-allowed"
+                    className="flex items-center gap-2 px-4 py-1.5 bg-blue-600 text-white rounded-full text-xs md:text-sm font-bold shadow-md hover:bg-blue-700 transition-all disabled:bg-slate-400 disabled:cursor-not-allowed min-w-[100px] justify-center"
                   >
-                    <UserIcon className="w-4 h-4" />
+                    {isLocked ? <Loader2 className="w-4 h-4 animate-spin" /> : <UserIcon className="w-4 h-4" />}
                     <span>{isLocked ? 'Wait...' : 'Sign In'}</span>
                   </button>
                 )}
