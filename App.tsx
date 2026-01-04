@@ -80,14 +80,13 @@ const App: React.FC = () => {
       localStorage.setItem('mg_user_profile', JSON.stringify(profile));
       localStorage.setItem('mg_logged_in', 'true');
       
-      // Auto-reconnect Drive silently if it was active
+      // Auto-reconnect Drive SILENTLY if it was active
       if (localStorage.getItem('drive_sticky_connection') === 'true') {
-        connectToDrive(email);
+        connectToDrive(email, true); // true = silent
       }
     } catch (err) {
       console.error("Profile sync error:", err);
     } finally {
-      // If we were waiting for the very first load, stop now
       setIsInitialLoading(false);
     }
   };
@@ -118,7 +117,7 @@ const App: React.FC = () => {
         google.accounts.id.initialize({
           client_id: CLIENT_ID,
           callback: handleCredentialResponse,
-          auto_select: false, // User must click
+          auto_select: false, 
           use_fedcm_for_prompt: true 
         });
         
@@ -143,7 +142,6 @@ const App: React.FC = () => {
           gdriveInitialized = true;
         }
 
-        // Always clear loading once Google SDK is ready (if not already cleared)
         setIsInitialLoading(false);
       } catch (err) {
         console.error("Google script error:", err);
@@ -164,7 +162,6 @@ const App: React.FC = () => {
   const handleLogin = () => {
     if (isGoogleBusy) return;
     setIsGoogleBusy(true);
-    // Timeout safety
     setTimeout(() => setIsGoogleBusy(false), 8000);
 
     try {
@@ -183,10 +180,10 @@ const App: React.FC = () => {
     if (isGoogleBusy) return;
     setIsGoogleBusy(true);
     setTimeout(() => setIsGoogleBusy(false), 2000);
-    connectToDrive(user?.email);
+    // User manual click = NOT silent (popup allowed)
+    connectToDrive(user?.email, false);
   };
 
-  // CORRECTED: Disconnect Drive without logging out of the app
   const handleDisconnectDriveOnly = () => {
     disconnectDrive();
     setIsDriveConnected(false);
@@ -381,7 +378,7 @@ const App: React.FC = () => {
       <Header 
         isDriveConnected={isDriveConnected} 
         onConnectDrive={handleConnectDrive} 
-        onDisconnectDrive={handleDisconnectDriveOnly} // Fixed: now separate from logout
+        onDisconnectDrive={handleDisconnectDriveOnly} 
         selectedModel={selectedModel}
         onModelChange={setSelectedModel}
         user={user}

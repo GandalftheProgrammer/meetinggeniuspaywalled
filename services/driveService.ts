@@ -30,6 +30,9 @@ export const initDrive = (callback: (token: string | null) => void) => {
         localStorage.setItem('drive_token_expiry', (Date.now() + tokenResponse.expires_in * 1000).toString());
         localStorage.setItem('drive_sticky_connection', 'true');
         callback(accessToken);
+      } else if (tokenResponse.error) {
+        console.warn("Drive silent connect failed:", tokenResponse.error);
+        callback(null);
       }
     },
   });
@@ -37,9 +40,16 @@ export const initDrive = (callback: (token: string | null) => void) => {
   const storedToken = localStorage.getItem('drive_token');
   const expiry = localStorage.getItem('drive_token_expiry');
   
-  if (storedToken && expiry && Date.now() < (parseInt(expiry) - 60000)) { // 1 min margin
+  // If we have a valid cached token, use it immediately
+  if (storedToken && expiry && Date.now() < (parseInt(expiry) - 60000)) { 
     accessToken = storedToken;
     callback(storedToken);
+  } else if (localStorage.getItem('drive_sticky_connection') === 'true') {
+    // Attempt a silent refresh if it was sticky but expired
+    setTimeout(() => {
+        tokenClient.requestAccessToken({ prompt: 'none' });
+    }, 500);
+    callback(null);
   } else {
     callback(null);
   }
@@ -47,35 +57,38 @@ export const initDrive = (callback: (token: string | null) => void) => {
 
 /**
  * Ensures we have a valid token before starting an upload.
- * If expired, it attempts a silent refresh.
  */
 export const ensureValidToken = async (emailHint?: string): Promise<string | null> => {
   const expiry = localStorage.getItem('drive_token_expiry');
-  const isExpired = !expiry || Date.now() > (parseInt(expiry) - 300000); // 5 min margin
+  const isExpired = !expiry || Date.now() > (parseInt(expiry) - 300000); 
 
   if (!isExpired && accessToken) return accessToken;
-
   if (!tokenClient) return null;
 
   return new Promise((resolve) => {
     const originalCallback = tokenClient.callback;
     tokenClient.callback = (response: any) => {
-      originalCallback(response);
+      if (originalCallback) originalCallback(response);
       resolve(response.access_token || null);
     };
     
+    // Always try silent first when ensuring a token for an automated task
     tokenClient.requestAccessToken({ 
       hint: emailHint, 
-      prompt: emailHint ? '' : 'none' 
+      prompt: 'none' 
     });
   });
 };
 
-export const connectToDrive = (emailHint?: string) => {
+/**
+ * Connect to drive. 
+ * @param silent If true, no popup will be shown. Will fail if user interaction is needed.
+ */
+export const connectToDrive = (emailHint?: string, silent: boolean = false) => {
   if (tokenClient) {
     tokenClient.requestAccessToken({ 
       hint: emailHint,
-      prompt: emailHint ? '' : 'select_account' 
+      prompt: silent ? 'none' : (emailHint ? '' : 'select_account')
     });
   }
 };
