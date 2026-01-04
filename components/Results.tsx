@@ -126,9 +126,7 @@ ${data.actionItems.length > 0 ? data.actionItems.map(item => `- [ ] ${item}`).jo
             <ArrowLeft className="w-4 h-4" />
             Back to record
           </button>
-          <p className="text-[11px] text-slate-400 font-medium ml-6">
-            Geen zorgen: je meeting is veilig opgeslagen in je geschiedenis en Drive.
-          </p>
+          
         </div>
         <div className="flex flex-wrap items-center gap-2">
            <div className="flex items-center gap-1.5 px-3 py-1.5 bg-green-50 text-green-700 rounded-full text-[10px] font-bold border border-green-100 uppercase tracking-tight mr-2">

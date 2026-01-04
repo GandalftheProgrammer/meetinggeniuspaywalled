@@ -14,6 +14,7 @@ interface HeaderProps {
   onLogout: () => void;
   onUpgrade: () => void;
   currentRecordingSeconds?: number;
+  isLocked?: boolean;
 }
 
 const Header: React.FC<HeaderProps> = ({ 
@@ -26,7 +27,8 @@ const Header: React.FC<HeaderProps> = ({
   onLogin,
   onLogout,
   onUpgrade,
-  currentRecordingSeconds = 0
+  currentRecordingSeconds = 0,
+  isLocked = false
 }) => {
   const totalUsed = (user?.secondsUsed || 0) + currentRecordingSeconds;
   const remainingSeconds = Math.max(0, FREE_LIMIT_SECONDS - totalUsed);
@@ -107,7 +109,8 @@ const Header: React.FC<HeaderProps> = ({
 
                 <button 
                     onClick={isDriveConnected ? onDisconnectDrive : onConnectDrive}
-                    className={`group flex items-center gap-2 px-3 py-1.5 rounded-full text-xs md:text-sm font-medium border transition-all shadow-sm shrink-0 ${
+                    disabled={isLocked}
+                    className={`group flex items-center gap-2 px-3 py-1.5 rounded-full text-xs md:text-sm font-medium border transition-all shadow-sm shrink-0 disabled:opacity-50 disabled:cursor-not-allowed ${
                         isDriveConnected 
                         ? 'bg-green-50 border-green-200 text-green-700 hover:bg-red-50 hover:border-red-200 hover:text-red-600' 
                         : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
@@ -128,10 +131,11 @@ const Header: React.FC<HeaderProps> = ({
                 ) : (
                   <button 
                     onClick={onLogin}
-                    className="flex items-center gap-2 px-4 py-1.5 bg-blue-600 text-white rounded-full text-xs md:text-sm font-bold shadow-md hover:bg-blue-700 transition-all"
+                    disabled={isLocked}
+                    className="flex items-center gap-2 px-4 py-1.5 bg-blue-600 text-white rounded-full text-xs md:text-sm font-bold shadow-md hover:bg-blue-700 transition-all disabled:bg-slate-400 disabled:cursor-not-allowed"
                   >
                     <UserIcon className="w-4 h-4" />
-                    <span>Sign In</span>
+                    <span>{isLocked ? 'Checking...' : 'Sign In'}</span>
                   </button>
                 )}
             </div>

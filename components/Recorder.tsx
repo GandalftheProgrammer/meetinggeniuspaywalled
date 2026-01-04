@@ -19,6 +19,7 @@ interface RecorderProps {
   onUpgrade: () => void;
   onLogin: () => void;
   onRecordingTick?: (seconds: number) => void;
+  isLocked?: boolean;
 }
 
 type AudioSource = 'microphone' | 'system';
@@ -35,7 +36,8 @@ const Recorder: React.FC<RecorderProps> = ({
   user,
   onUpgrade,
   onLogin,
-  onRecordingTick
+  onRecordingTick,
+  isLocked = false
 }) => {
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
@@ -152,19 +154,25 @@ const Recorder: React.FC<RecorderProps> = ({
       const startTime = Date.now();
       timerRef.current = window.setInterval(() => { setRecordingTime(Math.floor((Date.now() - startTime) / 1000)); }, 1000);
     } catch (error) {
-      alert("Microphone access denied.");
+      console.error("Recording error:", error);
+      setIsRecording(false);
+      onRecordingChange(false);
     }
   };
 
   const stopRecording = useCallback(() => {
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop();
-      cleanupResources();
-      setStream(null);
-      streamRef.current = null;
-      setIsRecording(false);
-      onRecordingChange(false);
+      try {
+        mediaRecorderRef.current.stop();
+      } catch (e) {
+        console.error("Stop recording failed:", e);
+      }
     }
+    cleanupResources();
+    setStream(null);
+    streamRef.current = null;
+    setIsRecording(false);
+    onRecordingChange(false);
   }, [onRecordingChange]);
 
   const toggleRecording = () => isRecording ? stopRecording() : startRecording();
@@ -264,8 +272,8 @@ const Recorder: React.FC<RecorderProps> = ({
       <div className="flex flex-col items-center justify-center w-full mb-6 gap-4">
         <button
           onClick={toggleRecording}
-          disabled={limitReached && !user?.isPro}
-          className={`group flex items-center justify-center w-20 h-20 rounded-full shadow-md transition-all duration-200 focus:outline-none ${
+          disabled={(limitReached && !user?.isPro) || isLocked}
+          className={`group flex items-center justify-center w-20 h-20 rounded-full shadow-md transition-all duration-200 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed ${
             isRecording ? 'bg-slate-900 hover:bg-slate-800' : 'bg-red-500 hover:bg-red-600 disabled:bg-slate-300'
           }`}
         >
@@ -275,13 +283,17 @@ const Recorder: React.FC<RecorderProps> = ({
         {!isRecording && !hasRecordedData && (
             <div>
                 <input type="file" accept="audio/*" ref={fileInputRef} onChange={handleFileSelect} className="hidden" />
-                <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 text-slate-500 hover:text-blue-600 text-sm font-medium transition-colors px-4 py-2 rounded-full hover:bg-blue-50">
+                <button 
+                  onClick={() => fileInputRef.current?.click()} 
+                  disabled={isLocked}
+                  className="flex items-center gap-2 text-slate-500 hover:text-blue-600 text-sm font-medium transition-colors px-4 py-2 rounded-full hover:bg-blue-50 disabled:opacity-50"
+                >
                     <Upload className="w-4 h-4" /> Upload Audio File
                 </button>
             </div>
         )}
         <p className="mt-2 text-slate-400 text-sm font-medium">
-          {isRecording ? "Recording..." : limitReached ? "Limit Reached" : hasRecordedData ? "Paused" : "Start Recording"}
+          {isRecording ? "Recording..." : isLocked ? "Waiting for Google..." : limitReached ? "Limit Reached" : hasRecordedData ? "Paused" : "Start Recording"}
         </p>
       </div>
 

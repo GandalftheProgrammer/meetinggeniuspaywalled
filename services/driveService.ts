@@ -9,8 +9,11 @@ let mainFolderId: string | null = null;
 let folderLock: Promise<string> | null = null;
 const subFolderCache: Record<string, string> = {};
 
+/**
+ * Initializes the Drive token client.
+ */
 export const initDrive = (callback: (token: string | null) => void) => {
-  if (typeof google === 'undefined') return;
+  if (typeof google === 'undefined' || !google.accounts?.oauth2) return;
 
   const env = (import.meta as any).env;
   const clientId = env?.VITE_GOOGLE_CLIENT_ID;
@@ -34,7 +37,7 @@ export const initDrive = (callback: (token: string | null) => void) => {
   const storedToken = localStorage.getItem('drive_token');
   const expiry = localStorage.getItem('drive_token_expiry');
   
-  if (storedToken && expiry && Date.now() < parseInt(expiry)) {
+  if (storedToken && expiry && Date.now() < (parseInt(expiry) - 60000)) { // 1 min margin
     accessToken = storedToken;
     callback(storedToken);
   } else {
@@ -43,14 +46,35 @@ export const initDrive = (callback: (token: string | null) => void) => {
 };
 
 /**
- * Connects to Drive. 
- * If an email is provided as a hint, Google skips the account selector.
+ * Ensures we have a valid token before starting an upload.
+ * If expired, it attempts a silent refresh.
  */
+export const ensureValidToken = async (emailHint?: string): Promise<string | null> => {
+  const expiry = localStorage.getItem('drive_token_expiry');
+  const isExpired = !expiry || Date.now() > (parseInt(expiry) - 300000); // 5 min margin
+
+  if (!isExpired && accessToken) return accessToken;
+
+  if (!tokenClient) return null;
+
+  return new Promise((resolve) => {
+    const originalCallback = tokenClient.callback;
+    tokenClient.callback = (response: any) => {
+      originalCallback(response);
+      resolve(response.access_token || null);
+    };
+    
+    tokenClient.requestAccessToken({ 
+      hint: emailHint, 
+      prompt: emailHint ? '' : 'none' 
+    });
+  });
+};
+
 export const connectToDrive = (emailHint?: string) => {
   if (tokenClient) {
     tokenClient.requestAccessToken({ 
       hint: emailHint,
-      // Removing 'consent select_account' makes it use the existing session if possible
       prompt: emailHint ? '' : 'select_account' 
     });
   }
@@ -66,35 +90,34 @@ export const disconnectDrive = () => {
   localStorage.removeItem('drive_sticky_connection');
 };
 
-const getFolderId = async (name: string, parentId?: string): Promise<string | null> => {
-  if (!accessToken) return null;
+const getFolderId = async (token: string, name: string, parentId?: string): Promise<string | null> => {
   let q = `mimeType='application/vnd.google-apps.folder' and name='${name}' and trashed=false`;
   if (parentId) q += ` and '${parentId}' in parents`;
   const r = await fetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}`, {
-    headers: { Authorization: `Bearer ${accessToken}` }
+    headers: { Authorization: `Bearer ${token}` }
   });
   const d = await r.json();
   return d.files?.[0]?.id || null;
 };
 
-const createFolder = async (name: string, parentId?: string): Promise<string> => {
+const createFolder = async (token: string, name: string, parentId?: string): Promise<string> => {
   const meta: any = { name, mimeType: 'application/vnd.google-apps.folder' };
   if (parentId) meta.parents = [parentId];
   const r = await fetch('https://www.googleapis.com/drive/v3/files', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(meta)
   });
   const d = await r.json();
   return d.id;
 };
 
-const ensureFolder = async (sub: string): Promise<string> => {
+const ensureFolder = async (token: string, sub: string): Promise<string> => {
     const main = localStorage.getItem('drive_folder_name') || 'MeetingGenius';
     if (!mainFolderId) {
         if (!folderLock) {
             folderLock = (async () => {
-                const id = await getFolderId(main) || await createFolder(main);
+                const id = await getFolderId(token, main) || await createFolder(token, main);
                 mainFolderId = id;
                 return id;
             })();
@@ -103,7 +126,7 @@ const ensureFolder = async (sub: string): Promise<string> => {
     }
     if (!mainFolderId) throw new Error("Main folder missing");
     if (subFolderCache[sub]) return subFolderCache[sub];
-    const subId = await getFolderId(sub, mainFolderId) || await createFolder(sub, mainFolderId);
+    const subId = await getFolderId(token, sub, mainFolderId) || await createFolder(token, sub, mainFolderId);
     subFolderCache[sub] = subId;
     return subId;
 };
@@ -125,19 +148,11 @@ const convertMarkdownToHtml = (md: string): string => {
     const processedLines = lines.map(line => {
         const trimmed = line.trim();
         if (!trimmed) return '';
-        if (
-            trimmed.startsWith('<h') || 
-            trimmed.startsWith('<ul') || 
-            trimmed.startsWith('<li') || 
-            trimmed.startsWith('</ul') || 
-            trimmed.startsWith('<p')
-        ) {
+        if (trimmed.startsWith('<h') || trimmed.startsWith('<ul') || trimmed.startsWith('<li') || trimmed.startsWith('</ul') || trimmed.startsWith('<p')) {
             return trimmed;
         }
         return `<p class="body-text">${trimmed}</p>`;
     });
-
-    const finalInnerHtml = processedLines.filter(l => l !== '').join('\n');
 
     return `
 <html>
@@ -152,13 +167,15 @@ const convertMarkdownToHtml = (md: string): string => {
         li { font-size: 11pt; margin-bottom: 6pt; }
     </style>
 </head>
-<body>${finalInnerHtml}</body>
+<body>${processedLines.filter(l => l !== '').join('\n')}</body>
 </html>`.trim();
 };
 
 const uploadFile = async (name: string, content: string | Blob, type: string, sub: string, toDoc: boolean): Promise<any> => {
-  if (!accessToken) throw new Error("No access token");
-  const folderId = await ensureFolder(sub);
+  const token = await ensureValidToken();
+  if (!token) throw new Error("Drive connection lost. Please reconnect.");
+  
+  const folderId = await ensureFolder(token, sub);
   const meta = { 
     name: name, 
     parents: [folderId], 
@@ -175,19 +192,15 @@ const uploadFile = async (name: string, content: string | Blob, type: string, su
     mediaContent,
     `\r\n--${boundary}--`
   ];
-  const body = new Blob(bodyParts);
   const r = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name', {
     method: 'POST',
     headers: { 
-      Authorization: `Bearer ${accessToken}`, 
+      Authorization: `Bearer ${token}`, 
       'Content-Type': `multipart/related; boundary=${boundary}` 
     },
-    body
+    body: new Blob(bodyParts)
   });
-  if (!r.ok) {
-     const errText = await r.text();
-     throw new Error(`Upload Failed: ${errText}`);
-  }
+  if (!r.ok) throw new Error(`Drive upload failed: ${r.status}`);
   return await r.json();
 };
 
