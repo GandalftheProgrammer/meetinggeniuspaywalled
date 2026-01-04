@@ -40,7 +40,7 @@ const App: React.FC = () => {
     }
   });
 
-  // Only show loader if we have NO cached user and we are waiting for Google scripts
+  // If we have a cached user, we don't show the initial loader (instant app)
   const [isInitialLoading, setIsInitialLoading] = useState(!user);
   
   const audioChunksRef = useRef<Blob[]>([]);
@@ -53,7 +53,6 @@ const App: React.FC = () => {
   const [sessionStartTime, setSessionStartTime] = useState<Date | null>(null);
   const [isGoogleBusy, setIsGoogleBusy] = useState(false);
   
-  // Fix: Added missing state to track recording time
   const [currentRecordingSeconds, setCurrentRecordingSeconds] = useState(0);
 
   const tokenClientRef = useRef<any>(null);
@@ -93,8 +92,6 @@ const App: React.FC = () => {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const page = params.get('p');
-    const stripeSessionId = params.get('session_id');
-
     if (page === 'privacy') setView('privacy');
     if (page === 'terms') setView('terms');
 
@@ -118,8 +115,8 @@ const App: React.FC = () => {
         google.accounts.id.initialize({
           client_id: CLIENT_ID,
           callback: handleCredentialResponse,
-          auto_select: true,
-          use_fedcm_for_prompt: false
+          auto_select: true, // Only if previously authorized
+          use_fedcm_for_prompt: true // Modern standard, prevents some popup blocks
         });
         
         tokenClientRef.current = google.accounts.oauth2.initTokenClient({
@@ -143,13 +140,18 @@ const App: React.FC = () => {
           gdriveInitialized = true;
         }
 
-        // Silent auto-login attempt
-        if (localStorage.getItem('mg_logged_in') === 'true') {
+        // --- FIX: NO AUTO-PROMPT IF ALREADY LOGGED IN ---
+        // If we already have the user in state, DO NOT show the One Tap prompt.
+        // If not logged in, we try to show it once.
+        if (!localStorage.getItem('mg_user_profile')) {
           google.accounts.id.prompt((notification: any) => {
-            // Even if prompt is skipped, we hide the loader because we likely have a cached user
-            setIsInitialLoading(false);
+            if (notification.isNotDisplayed()) {
+              console.log("One Tap not displayed:", notification.getNotDisplayedReason());
+              setIsInitialLoading(false);
+            }
           });
         } else {
+          // If we are logged in, just clear loading immediately
           setIsInitialLoading(false);
         }
       } catch (err) {
@@ -171,9 +173,11 @@ const App: React.FC = () => {
   const handleLogin = () => {
     if (isGoogleBusy) return;
     setIsGoogleBusy(true);
-    const timeout = setTimeout(() => setIsGoogleBusy(false), 3000);
+    // Safety timeout to reset busy state
+    const timeout = setTimeout(() => setIsGoogleBusy(false), 5000);
 
     try {
+      // Direct user gesture triggered request
       if (tokenClientRef.current) {
         tokenClientRef.current.requestAccessToken();
       } else if ((window as any).google?.accounts?.id) {
@@ -183,6 +187,7 @@ const App: React.FC = () => {
         clearTimeout(timeout);
       }
     } catch (e) {
+      console.error("Login trigger failed:", e);
       setIsGoogleBusy(false);
       clearTimeout(timeout);
     }
@@ -196,6 +201,12 @@ const App: React.FC = () => {
   };
 
   const handleLogout = () => {
+    // 1. Remove Google session hints
+    if ((window as any).google?.accounts?.id) {
+      google.accounts.id.disableAutoSelect();
+    }
+    
+    // 2. Clear local data
     setUser(null);
     disconnectDrive();
     setIsDriveConnected(false);
@@ -203,6 +214,9 @@ const App: React.FC = () => {
     localStorage.removeItem('mg_user_profile');
     localStorage.removeItem('drive_sticky_connection');
     addLog("Logged out.");
+    
+    // 3. Optional: reload to clean up Google state fully if needed
+    // window.location.reload(); 
   };
 
   const handleProcessAudio = async (mode: ProcessingMode) => {
@@ -279,7 +293,6 @@ const App: React.FC = () => {
     setDebugLogs([]);
     setTitle("");
     setError(null);
-    // Fix: Reset recording seconds state
     setCurrentRecordingSeconds(0);
   };
 
@@ -333,7 +346,6 @@ const App: React.FC = () => {
             const blob = new Blob(audioChunksRef.current, { type: audioChunksRef.current[0]?.type || 'audio/webm' });
             setCombinedBlob(blob);
             setAudioUrl(URL.createObjectURL(blob));
-            // Fix: Clear recording seconds state when recording finishes
             setCurrentRecordingSeconds(0);
           }
         }}
@@ -351,7 +363,6 @@ const App: React.FC = () => {
         user={user}
         onUpgrade={() => {}} 
         onLogin={handleLogin}
-        // Fix: Added missing state setter
         onRecordingTick={setCurrentRecordingSeconds}
         isLocked={isGoogleBusy}
       />
@@ -391,7 +402,6 @@ const App: React.FC = () => {
         onLogin={handleLogin}
         onLogout={handleLogout}
         onUpgrade={() => {}}
-        // Fix: Added missing state variable
         currentRecordingSeconds={currentRecordingSeconds}
         isLocked={isGoogleBusy}
       />
