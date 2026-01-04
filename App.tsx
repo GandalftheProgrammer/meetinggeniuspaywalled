@@ -16,7 +16,6 @@ declare const google: any;
 
 type View = 'main' | 'privacy' | 'terms';
 
-// Global flags to prevent double initialization outside React lifecycle
 let googleInitialized = false;
 let gdriveInitialized = false;
 
@@ -26,46 +25,31 @@ const App: React.FC = () => {
   const [title, setTitle] = useState<string>("");
   const [selectedModel, setSelectedModel] = useState<GeminiModel>('gemini-2.5-flash');
   const [lastRequestedMode, setLastRequestedMode] = useState<ProcessingMode>('NOTES_ONLY');
-  
   const [meetingData, setMeetingData] = useState<MeetingData | null>(null);
   const [error, setError] = useState<string | null>(null);
-  
-  // IMMEDIATELY load user from localStorage for instant UI
   const [user, setUser] = useState<UserProfile | null>(() => {
     try {
       const cached = localStorage.getItem('mg_user_profile');
       return cached ? JSON.parse(cached) : null;
-    } catch {
-      return null;
-    }
+    } catch { return null; }
   });
 
-  // Only show initial loader if NO user is cached at all
-  const [isInitialLoading, setIsInitialLoading] = useState(() => {
-    return !localStorage.getItem('mg_user_profile');
-  });
-  
+  const [isInitialLoading, setIsInitialLoading] = useState(() => !localStorage.getItem('mg_user_profile'));
   const audioChunksRef = useRef<Blob[]>([]);
   const sessionIdRef = useRef<string>(`session_${Date.now()}`);
   const [combinedBlob, setCombinedBlob] = useState<Blob | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
-  
   const [isDriveConnected, setIsDriveConnected] = useState(false);
   const [debugLogs, setDebugLogs] = useState<string[]>([]);
   const [sessionStartTime, setSessionStartTime] = useState<Date | null>(null);
   const [isGoogleBusy, setIsGoogleBusy] = useState(false);
-  
   const [currentRecordingSeconds, setCurrentRecordingSeconds] = useState(0);
-
   const tokenClientRef = useRef<any>(null);
 
   const addLog = (msg: string) => {
     setDebugLogs(prev => [...prev, `${new Date().toLocaleTimeString('en-GB')} - ${msg}`]);
   };
 
-  /**
-   * Syncs user profile with backend in background
-   */
   const syncUserProfile = async (email: string, uid: string) => {
     try {
       const res = await fetch('/.netlify/functions/get-user', {
@@ -74,28 +58,19 @@ const App: React.FC = () => {
         body: JSON.stringify({ email, uid })
       });
       if (!res.ok) throw new Error("Sync failed");
-      
       const profile = await res.json();
       setUser(profile);
       localStorage.setItem('mg_user_profile', JSON.stringify(profile));
       localStorage.setItem('mg_logged_in', 'true');
       localStorage.setItem('mg_drive_email_hint', email);
       
-      // DRIVE PERSISTENT INTENT LOGIC
-      // Check if this user (or app session) intended to be connected to Drive
-      const intent = localStorage.getItem('mg_drive_intent') === 'true';
-      const alreadyHasToken = !!getAccessToken();
-
-      if (intent && !alreadyHasToken) {
-        console.log("Drive intent detected. Initializing silent connection flow...");
-        // Always try silent first to avoid flash/popup if session is already active
+      // AUTO-CONNECT AFTER LOGIN:
+      // If the user's preference (intent) is to be connected, trigger the smart flow.
+      if (localStorage.getItem('mg_drive_intent') === 'true' && !getAccessToken()) {
         connectToDrive(email, true);
       }
-    } catch (err) {
-      console.error("Profile sync error:", err);
-    } finally {
-      setIsInitialLoading(false);
-    }
+    } catch (err) { console.error("Profile sync error:", err); } 
+    finally { setIsInitialLoading(false); }
   };
 
   useEffect(() => {
@@ -104,10 +79,7 @@ const App: React.FC = () => {
     if (page === 'privacy') setView('privacy');
     if (page === 'terms') setView('terms');
 
-    // Background sync if we have a cached user
-    if (user) {
-      syncUserProfile(user.email, user.uid);
-    }
+    if (user) syncUserProfile(user.email, user.uid);
 
     const handleCredentialResponse = async (response: any) => {
       const decoded = JSON.parse(atob(response.credential.split('.')[1]));
@@ -119,7 +91,6 @@ const App: React.FC = () => {
 
     const setupGoogle = () => {
       if (!(window as any).google || googleInitialized) return;
-      
       try {
         google.accounts.id.initialize({
           client_id: CLIENT_ID,
@@ -143,12 +114,10 @@ const App: React.FC = () => {
         });
 
         googleInitialized = true;
-        
         if (!gdriveInitialized) {
           initDrive((token) => setIsDriveConnected(!!token));
           gdriveInitialized = true;
         }
-
         setIsInitialLoading(false);
       } catch (err) {
         console.error("Google script error:", err);
@@ -157,12 +126,8 @@ const App: React.FC = () => {
     };
 
     const checkInterval = setInterval(() => {
-      if ((window as any).google) {
-        setupGoogle();
-        clearInterval(checkInterval);
-      }
+      if ((window as any).google) { setupGoogle(); clearInterval(checkInterval); }
     }, 100);
-
     return () => clearInterval(checkInterval);
   }, []);
 
@@ -170,17 +135,10 @@ const App: React.FC = () => {
     if (isGoogleBusy) return;
     setIsGoogleBusy(true);
     setTimeout(() => setIsGoogleBusy(false), 8000);
-
     try {
-      if (tokenClientRef.current) {
-        tokenClientRef.current.requestAccessToken();
-      } else if ((window as any).google?.accounts?.id) {
-        google.accounts.id.prompt();
-      }
-    } catch (e) {
-      console.error("Login trigger failed:", e);
-      setIsGoogleBusy(false);
-    }
+      if (tokenClientRef.current) tokenClientRef.current.requestAccessToken();
+      else if ((window as any).google?.accounts?.id) google.accounts.id.prompt();
+    } catch (e) { setIsGoogleBusy(false); }
   };
 
   const handleConnectDrive = () => {
@@ -188,29 +146,20 @@ const App: React.FC = () => {
     setIsGoogleBusy(true);
     setTimeout(() => setIsGoogleBusy(false), 2000);
     
-    // Explicit user click = set persistent intent
-    localStorage.setItem('mg_drive_intent', 'true');
-    if (user) localStorage.setItem('mg_drive_email_hint', user.email);
-
-    // Initial manual connect is NOT silent so user can actually see the permission screen if needed
-    connectToDrive(user?.email, false);
+    // Manual click always starts the smart flow (silent first, then popup)
+    connectToDrive(user?.email, true);
   };
 
   const handleDisconnectDriveOnly = () => {
-    // Explicit user click = clear persistent intent
-    localStorage.setItem('mg_drive_intent', 'false');
-    disconnectDrive(true); // true = clear all local storage tokens & hints
+    disconnectDrive(true);
     setIsDriveConnected(false);
     addLog("Disconnected from Google Drive.");
   };
 
   const handleLogout = () => {
-    if ((window as any).google?.accounts?.id) {
-      google.accounts.id.disableAutoSelect();
-    }
-    // Note: We KEEP mg_drive_intent so it's remembered for the next time they sign in
+    if ((window as any).google?.accounts?.id) google.accounts.id.disableAutoSelect();
     setUser(null);
-    disconnectDrive(false); // false = don't clear the 'intent' flag
+    disconnectDrive(false); // keep intent so we can auto-reconnect on next login
     setIsDriveConnected(false);
     localStorage.removeItem('mg_logged_in');
     localStorage.removeItem('mg_user_profile');
@@ -220,11 +169,6 @@ const App: React.FC = () => {
   const handleProcessAudio = async (mode: ProcessingMode) => {
     if (!combinedBlob || !user) { handleLogin(); return; }
     
-    if (isDriveConnected) {
-      addLog("Verifying cloud access...");
-      await ensureValidToken(user.email);
-    }
-
     setLastRequestedMode(mode);
     let finalTitle = title.trim() || "Meeting";
     setTitle(finalTitle);
@@ -237,10 +181,9 @@ const App: React.FC = () => {
       setMeetingData(newData);
       setAppState(AppState.COMPLETED);
       deleteSessionData(sessionIdRef.current).catch(() => {});
-      
       syncUserProfile(user.email, user.uid);
 
-      if (isDriveConnected) {
+      if (localStorage.getItem('mg_drive_intent') === 'true') {
         autoSyncToDrive(newData, finalTitle, combinedBlob);
       }
     } catch (apiError: any) {
@@ -250,32 +193,28 @@ const App: React.FC = () => {
   };
 
   const autoSyncToDrive = async (data: MeetingData, currentTitle: string, blob: Blob | null) => {
-    if (!isDriveConnected) return;
     const startTime = sessionStartTime || new Date();
     const dateTimeStr = startTime.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }).replace(' at', '');
     const cleanTitle = currentTitle.replace(/[()]/g, '').trim();
     const safeBaseName = `${cleanTitle} - ${dateTimeStr}`;
 
     addLog("Syncing to Google Drive...");
-
     try {
         if (blob) {
           const ext = blob.type.includes('wav') ? 'wav' : blob.type.includes('mp4') ? 'm4a' : 'webm';
           await uploadAudioToDrive(`${safeBaseName} - audio.${ext}`, blob);
         }
-
         if (data.summary || data.conclusions.length > 0) {
           const md = `# ${cleanTitle} notes\n*Recorded on ${dateTimeStr}*\n\n${data.summary}\n\n## Conclusions\n${data.conclusions.map(i => `- ${i}`).join('\n')}\n\n## Action Items\n${data.actionItems.map(i => `- ${i}`).join('\n')}`;
           await uploadTextToDrive(`${safeBaseName} - notes`, md, 'Notes');
         }
-
         if (data.transcription?.trim()) {
           const tmd = `# ${cleanTitle} transcript\n*Recorded on ${dateTimeStr}*\n\n${data.transcription}`;
           await uploadTextToDrive(`${safeBaseName} - transcript`, tmd, 'Transcripts');
         }
         addLog("Drive sync completed.");
     } catch (e: any) {
-        addLog(`Drive sync error: ${e.message}`);
+        addLog(`Drive error: ${e.message}`);
     }
   };
 
@@ -293,10 +232,7 @@ const App: React.FC = () => {
     setCurrentRecordingSeconds(0);
   };
 
-  const handleNavigate = (newView: View) => {
-    setView(newView);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  };
+  const handleNavigate = (newView: View) => { setView(newView); window.scrollTo({ top: 0, behavior: 'smooth' }); };
 
   if (isInitialLoading) {
     return (

@@ -10,8 +10,8 @@ let folderLock: Promise<string> | null = null;
 const subFolderCache: Record<string, string> = {};
 let globalStatusCallback: ((token: string | null) => void) | null = null;
 
-// Track state for the silent-first strategy
-let isSilentAttempt = false;
+// Persistent state for the smart flow
+let isSilentMode = false;
 let lastEmailHint: string | undefined = undefined;
 
 /**
@@ -20,7 +20,7 @@ let lastEmailHint: string | undefined = undefined;
 export const getAccessToken = () => accessToken;
 
 /**
- * Initializes the Drive token client.
+ * Initializes the Drive token client with smart fallback logic.
  */
 export const initDrive = (callback: (token: string | null) => void) => {
   if (typeof google === 'undefined' || !google.accounts?.oauth2) return;
@@ -41,89 +41,93 @@ export const initDrive = (callback: (token: string | null) => void) => {
         localStorage.setItem('drive_token', accessToken);
         localStorage.setItem('drive_token_expiry', (Date.now() + tokenResponse.expires_in * 1000).toString());
         if (globalStatusCallback) globalStatusCallback(accessToken);
-        isSilentAttempt = false;
-      } else if (tokenResponse.error) {
-        console.warn("Drive connection attempt result:", tokenResponse.error);
-        
-        // Phase 2 Fallback: If silent refresh fails with 'interaction_required', 
-        // and the user has the 'intent' to be connected, trigger the interactive popup.
-        if (isSilentAttempt && (tokenResponse.error === 'interaction_required' || tokenResponse.error === 'consent_required')) {
-          const intent = localStorage.getItem('mg_drive_intent') === 'true';
-          if (intent) {
-            console.log("Drive background refresh not possible. Attempting interactive fallback...");
-            isSilentAttempt = false; // Next one is not silent
-            connectToDrive(lastEmailHint, false);
-            return;
-          }
-        }
-        
-        isSilentAttempt = false;
+      } else if (tokenResponse.error === 'interaction_required' && isSilentMode) {
+        // AUTO-FALLBACK: Silent failed, so we MUST show the popup now to satisfy the user's intent.
+        isSilentMode = false;
+        tokenClient.requestAccessToken({ hint: lastEmailHint, prompt: '' });
+      } else {
+        // Hard failure or user cancelled the popup
+        accessToken = null;
         if (globalStatusCallback) globalStatusCallback(null);
       }
     },
   });
 
-  // Check cache for existing valid token (for page refresh)
+  // Handle Page Refresh: Check storage
   const storedToken = localStorage.getItem('drive_token');
   const expiry = localStorage.getItem('drive_token_expiry');
   
-  if (storedToken && expiry && Date.now() < (parseInt(expiry) - 60000)) { 
+  if (storedToken && expiry && Date.now() < (parseInt(expiry) - 60000)) {
     accessToken = storedToken;
     callback(storedToken);
+  } else if (localStorage.getItem('mg_drive_intent') === 'true') {
+    // No token, but user wants to be connected. Start the smart flow.
+    connectToDrive(localStorage.getItem('mg_drive_email_hint') || undefined, true);
   } else {
     callback(null);
   }
 };
 
 /**
- * Connect to drive. 
- * @param emailHint Optional email to skip account selection.
- * @param silent If true, tries to connect without showing any UI.
+ * Smart connection flow. Tries silent first, then popup.
+ * @param emailHint User's email to speed up Google's selection.
+ * @param silent If true, starts without a popup.
  */
 export const connectToDrive = (emailHint?: string, silent: boolean = false) => {
   if (!tokenClient) return;
   
-  // If we already have a valid token in memory, don't re-request unless force
-  const expiry = localStorage.getItem('drive_token_expiry');
-  if (accessToken && expiry && Date.now() < (parseInt(expiry) - 60000)) {
-    if (globalStatusCallback) globalStatusCallback(accessToken);
-    return;
-  }
-
-  isSilentAttempt = silent;
+  isSilentMode = silent;
   lastEmailHint = emailHint || localStorage.getItem('mg_drive_email_hint') || undefined;
+  
+  // Set intent if this is a manual or initial login trigger
+  localStorage.setItem('mg_drive_intent', 'true');
+  if (lastEmailHint) localStorage.setItem('mg_drive_email_hint', lastEmailHint);
 
-  const requestConfig: any = {
+  tokenClient.requestAccessToken({
     hint: lastEmailHint,
     prompt: silent ? 'none' : '' 
-  };
-
-  try {
-    tokenClient.requestAccessToken(requestConfig);
-  } catch (e) {
-    console.error("Drive request error:", e);
-    isSilentAttempt = false;
-  }
+  });
 };
 
 /**
- * Ensures we have a valid token before starting an upload.
+ * Ensures a valid token is available before a cloud task.
  */
 export const ensureValidToken = async (emailHint?: string): Promise<string | null> => {
   const expiry = localStorage.getItem('drive_token_expiry');
+  const storedToken = localStorage.getItem('drive_token');
   const isExpired = !expiry || Date.now() > (parseInt(expiry) - 300000); 
 
-  if (!isExpired && accessToken) return accessToken;
+  if (!isExpired && storedToken) {
+    accessToken = storedToken;
+    return storedToken;
+  }
+  
   if (!tokenClient) return null;
 
   return new Promise((resolve) => {
     const originalCallback = tokenClient.callback;
+    
     tokenClient.callback = (response: any) => {
-      tokenClient.callback = originalCallback; 
-      if (originalCallback) originalCallback(response);
-      resolve(response.access_token || null);
+      if (response.access_token) {
+          accessToken = response.access_token;
+          localStorage.setItem('drive_token', accessToken);
+          localStorage.setItem('drive_token_expiry', (Date.now() + response.expires_in * 1000).toString());
+          if (globalStatusCallback) globalStatusCallback(accessToken);
+          tokenClient.callback = originalCallback; // Restore
+          resolve(accessToken);
+      } else if (response.error === 'interaction_required' && isSilentMode) {
+          isSilentMode = false;
+          tokenClient.requestAccessToken({ 
+              hint: emailHint || localStorage.getItem('mg_drive_email_hint') || undefined, 
+              prompt: '' 
+          });
+      } else {
+          tokenClient.callback = originalCallback; // Restore
+          resolve(null);
+      }
     };
     
+    isSilentMode = true;
     tokenClient.requestAccessToken({ 
       hint: emailHint || localStorage.getItem('mg_drive_email_hint') || undefined, 
       prompt: 'none' 
@@ -132,8 +136,7 @@ export const ensureValidToken = async (emailHint?: string): Promise<string | nul
 };
 
 /**
- * Disconnects drive.
- * @param clearIntent If true, clears the user's permanent preference (intent).
+ * Disconnects drive and clears the user's persistent preference.
  */
 export const disconnectDrive = (clearIntent: boolean = true) => {
   accessToken = null;
@@ -233,8 +236,8 @@ const convertMarkdownToHtml = (md: string): string => {
 };
 
 const uploadFile = async (name: string, content: string | Blob, type: string, sub: string, toDoc: boolean): Promise<any> => {
-  const token = await ensureValidToken();
-  if (!token) throw new Error("Drive connection lost. Please reconnect.");
+  let token = await ensureValidToken();
+  if (!token) throw new Error("Could not verify cloud access. Please check the Google popup.");
   
   const folderId = await ensureFolder(token, sub);
   const meta = { 
