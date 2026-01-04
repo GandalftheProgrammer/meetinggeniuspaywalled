@@ -23,7 +23,7 @@ const Footer: React.FC<FooterProps> = ({ onNavigate }) => {
         <div className="flex items-center gap-8 text-sm font-medium text-slate-500">
           <a href="/?p=privacy" onClick={(e) => handleClick(e, 'privacy')} className="hover:text-blue-600 transition-colors">Privacy Policy</a>
           <a href="/?p=terms" onClick={(e) => handleClick(e, 'terms')} className="hover:text-blue-600 transition-colors">Terms of Service</a>
-          <a href="mailto:support@meetinggenius.ai" className="hover:text-blue-600 transition-colors">Contact Support</a>
+          <a href="mailto:roebroek.erik@gmail.com" className="hover:text-blue-600 transition-colors">Contact Support</a>
         </div>
 
         <div className="text-slate-400 text-xs font-medium">
