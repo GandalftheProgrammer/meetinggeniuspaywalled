@@ -284,7 +284,7 @@ const App: React.FC = () => {
         <h2 className="text-3xl font-bold text-slate-800 mb-4">Powerful Meeting Intelligence</h2>
         <p className="text-slate-600 max-w-2xl mx-auto">
           MeetingGenius is an AI-powered productivity tool designed to help you stay present in your meetings. 
-          We use Google's latest Gemini 3 models to turn audio into structured intelligence.
+          We use Google's latest Gemini models to turn audio into structured intelligence.
         </p>
       </div>
 
@@ -294,7 +294,7 @@ const App: React.FC = () => {
             <Zap className="w-6 h-6 text-blue-600" />
           </div>
           <h3 className="font-bold text-slate-800 mb-2">Instant Summaries</h3>
-          <p className="text-sm text-slate-500">Get structured notes, action items, and conclusions in seconds using Gemini 3.</p>
+          <p className="text-sm text-slate-500">Record on phone or laptop to get structured notes, action items, and conclusions.</p>
         </div>
         <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 text-center">
           <div className="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center mx-auto mb-4">
@@ -308,16 +308,11 @@ const App: React.FC = () => {
             <Shield className="w-6 h-6 text-purple-600" />
           </div>
           <h3 className="font-bold text-slate-800 mb-2">Privacy First</h3>
-          <p className="text-sm text-slate-500">Your data is yours. We do not train models on your recordings or sell your personal data.</p>
+          <p className="text-sm text-slate-500">Your data is yours. We don’t store, view, or sell your recordings.</p>
         </div>
       </div>
 
-      <div className="mt-12 p-6 bg-blue-50 rounded-2xl border border-blue-100 text-center">
-        <p className="text-sm text-blue-800 font-medium">
-          "The most accurate meeting assistant I've used. The Gemini 3 integration is a game changer for technical discussions."
-        </p>
-        <span className="text-xs text-blue-500 block mt-2">— Verified User</span>
-      </div>
+      
     </div>
   );
 

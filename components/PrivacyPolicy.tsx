@@ -23,7 +23,7 @@ const PrivacyPolicy: React.FC<PrivacyPolicyProps> = ({ onBack }) => {
           <h1 className="text-3xl font-bold text-slate-900 m-0">Privacy Policy</h1>
         </div>
 
-        <p className="text-slate-500 italic">Last Updated: May 20, 2024</p>
+        <p className="text-slate-500 italic">Last Updated: January 4, 2026</p>
 
         <h2>1. Introduction</h2>
         <p>
@@ -63,7 +63,7 @@ const PrivacyPolicy: React.FC<PrivacyPolicyProps> = ({ onBack }) => {
 
         <h2>7. Contact Us</h2>
         <p>
-          If you have questions about this Privacy Policy, please contact us at privacy@meetinggenius.ai.
+          If you have questions about this Privacy Policy, please contact us at roebroek.erik@gmail.com.
         </p>
       </div>
     </div>
