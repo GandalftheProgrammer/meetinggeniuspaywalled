@@ -79,16 +79,17 @@ const App: React.FC = () => {
       setUser(profile);
       localStorage.setItem('mg_user_profile', JSON.stringify(profile));
       localStorage.setItem('mg_logged_in', 'true');
-      localStorage.setItem('mg_drive_email_hint', email); // Keep hint updated
+      localStorage.setItem('mg_drive_email_hint', email);
       
-      // Drive Intent Persistence logic
+      // DRIVE PERSISTENT INTENT LOGIC
+      // Check if this user (or app session) intended to be connected to Drive
       const intent = localStorage.getItem('mg_drive_intent') === 'true';
-      const hasToken = !!getAccessToken();
+      const alreadyHasToken = !!getAccessToken();
 
-      // If the user's intent is to be connected, attempt a silent background reconnect
-      if (intent && !hasToken) {
-        console.log("Drive intent detected. Attempting background connection...");
-        connectToDrive(email, true); // true = silent refresh first
+      if (intent && !alreadyHasToken) {
+        console.log("Drive intent detected. Initializing silent connection flow...");
+        // Always try silent first to avoid flash/popup if session is already active
+        connectToDrive(email, true);
       }
     } catch (err) {
       console.error("Profile sync error:", err);
@@ -187,18 +188,18 @@ const App: React.FC = () => {
     setIsGoogleBusy(true);
     setTimeout(() => setIsGoogleBusy(false), 2000);
     
-    // Set the intent flag so we know the user wants this connection across refreshes
+    // Explicit user click = set persistent intent
     localStorage.setItem('mg_drive_intent', 'true');
     if (user) localStorage.setItem('mg_drive_email_hint', user.email);
 
-    // Initial manual connection is NEVER silent to ensure the user can grant permission
+    // Initial manual connect is NOT silent so user can actually see the permission screen if needed
     connectToDrive(user?.email, false);
   };
 
   const handleDisconnectDriveOnly = () => {
-    // Explicitly clearing the intent as the user clicked "Disconnect"
+    // Explicit user click = clear persistent intent
     localStorage.setItem('mg_drive_intent', 'false');
-    disconnectDrive(true); // true = full cleanup of tokens and intent hints
+    disconnectDrive(true); // true = clear all local storage tokens & hints
     setIsDriveConnected(false);
     addLog("Disconnected from Google Drive.");
   };
@@ -207,10 +208,9 @@ const App: React.FC = () => {
     if ((window as any).google?.accounts?.id) {
       google.accounts.id.disableAutoSelect();
     }
-    // Note: We do NOT clear mg_drive_intent here so it's remembered for the next sign-in.
-    // We only disconnect the active session tokens.
+    // Note: We KEEP mg_drive_intent so it's remembered for the next time they sign in
     setUser(null);
-    disconnectDrive(false); // false = keep the intent flag so next login auto-reconnects
+    disconnectDrive(false); // false = don't clear the 'intent' flag
     setIsDriveConnected(false);
     localStorage.removeItem('mg_logged_in');
     localStorage.removeItem('mg_user_profile');

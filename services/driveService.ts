@@ -10,9 +10,9 @@ let folderLock: Promise<string> | null = null;
 const subFolderCache: Record<string, string> = {};
 let globalStatusCallback: ((token: string | null) => void) | null = null;
 
-// Track if we are currently performing a silent attempt to handle fallbacks correctly
+// Track state for the silent-first strategy
 let isSilentAttempt = false;
-let currentEmailHint: string | undefined = undefined;
+let lastEmailHint: string | undefined = undefined;
 
 /**
  * Returns the current access token if available.
@@ -41,27 +41,29 @@ export const initDrive = (callback: (token: string | null) => void) => {
         localStorage.setItem('drive_token', accessToken);
         localStorage.setItem('drive_token_expiry', (Date.now() + tokenResponse.expires_in * 1000).toString());
         if (globalStatusCallback) globalStatusCallback(accessToken);
+        isSilentAttempt = false;
       } else if (tokenResponse.error) {
         console.warn("Drive connection attempt result:", tokenResponse.error);
         
         // Phase 2 Fallback: If silent refresh fails with 'interaction_required', 
-        // and we have the intent to be connected, trigger the interactive popup.
-        if (isSilentAttempt && tokenResponse.error === 'interaction_required') {
+        // and the user has the 'intent' to be connected, trigger the interactive popup.
+        if (isSilentAttempt && (tokenResponse.error === 'interaction_required' || tokenResponse.error === 'consent_required')) {
           const intent = localStorage.getItem('mg_drive_intent') === 'true';
           if (intent) {
-            console.log("Interaction required for Drive. Opening popup...");
-            isSilentAttempt = false;
-            connectToDrive(currentEmailHint, false);
+            console.log("Drive background refresh not possible. Attempting interactive fallback...");
+            isSilentAttempt = false; // Next one is not silent
+            connectToDrive(lastEmailHint, false);
             return;
           }
         }
         
+        isSilentAttempt = false;
         if (globalStatusCallback) globalStatusCallback(null);
       }
     },
   });
 
-  // Basic cache check for page refresh
+  // Check cache for existing valid token (for page refresh)
   const storedToken = localStorage.getItem('drive_token');
   const expiry = localStorage.getItem('drive_token_expiry');
   
@@ -74,14 +76,14 @@ export const initDrive = (callback: (token: string | null) => void) => {
 };
 
 /**
- * Connect to drive using the persistent intent logic.
- * @param emailHint Optional email for hint.
- * @param silent If true, tries background refresh first.
+ * Connect to drive. 
+ * @param emailHint Optional email to skip account selection.
+ * @param silent If true, tries to connect without showing any UI.
  */
 export const connectToDrive = (emailHint?: string, silent: boolean = false) => {
   if (!tokenClient) return;
   
-  // Prevent unnecessary requests if we already have a valid token
+  // If we already have a valid token in memory, don't re-request unless force
   const expiry = localStorage.getItem('drive_token_expiry');
   if (accessToken && expiry && Date.now() < (parseInt(expiry) - 60000)) {
     if (globalStatusCallback) globalStatusCallback(accessToken);
@@ -89,10 +91,10 @@ export const connectToDrive = (emailHint?: string, silent: boolean = false) => {
   }
 
   isSilentAttempt = silent;
-  currentEmailHint = emailHint || localStorage.getItem('mg_drive_email_hint') || undefined;
+  lastEmailHint = emailHint || localStorage.getItem('mg_drive_email_hint') || undefined;
 
   const requestConfig: any = {
-    hint: currentEmailHint,
+    hint: lastEmailHint,
     prompt: silent ? 'none' : '' 
   };
 
@@ -100,6 +102,7 @@ export const connectToDrive = (emailHint?: string, silent: boolean = false) => {
     tokenClient.requestAccessToken(requestConfig);
   } catch (e) {
     console.error("Drive request error:", e);
+    isSilentAttempt = false;
   }
 };
 
@@ -130,7 +133,7 @@ export const ensureValidToken = async (emailHint?: string): Promise<string | nul
 
 /**
  * Disconnects drive.
- * @param clearIntent If true, completely clears the user's preference for Drive.
+ * @param clearIntent If true, clears the user's permanent preference (intent).
  */
 export const disconnectDrive = (clearIntent: boolean = true) => {
   accessToken = null;
