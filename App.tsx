@@ -30,7 +30,7 @@ const App: React.FC = () => {
   const [meetingData, setMeetingData] = useState<MeetingData | null>(null);
   const [error, setError] = useState<string | null>(null);
   
-  // IMMEDIATELY load user from localStorage to prevent "Sign In" flicker on refresh
+  // IMMEDIATELY load user from localStorage for instant UI
   const [user, setUser] = useState<UserProfile | null>(() => {
     try {
       const cached = localStorage.getItem('mg_user_profile');
@@ -40,8 +40,10 @@ const App: React.FC = () => {
     }
   });
 
-  // If we have a cached user, we don't show the initial loader (instant app)
-  const [isInitialLoading, setIsInitialLoading] = useState(!user);
+  // Only show initial loader if NO user is cached at all
+  const [isInitialLoading, setIsInitialLoading] = useState(() => {
+    return !localStorage.getItem('mg_user_profile');
+  });
   
   const audioChunksRef = useRef<Blob[]>([]);
   const sessionIdRef = useRef<string>(`session_${Date.now()}`);
@@ -62,7 +64,7 @@ const App: React.FC = () => {
   };
 
   /**
-   * Fetches latest user data from backend and updates local cache
+   * Syncs user profile with backend in background
    */
   const syncUserProfile = async (email: string, uid: string) => {
     try {
@@ -78,13 +80,14 @@ const App: React.FC = () => {
       localStorage.setItem('mg_user_profile', JSON.stringify(profile));
       localStorage.setItem('mg_logged_in', 'true');
       
-      // Auto-reconnect Drive if it was previously active
+      // Auto-reconnect Drive silently if it was active
       if (localStorage.getItem('drive_sticky_connection') === 'true') {
         connectToDrive(email);
       }
     } catch (err) {
       console.error("Profile sync error:", err);
     } finally {
+      // If we were waiting for the very first load, stop now
       setIsInitialLoading(false);
     }
   };
@@ -95,7 +98,7 @@ const App: React.FC = () => {
     if (page === 'privacy') setView('privacy');
     if (page === 'terms') setView('terms');
 
-    // If we have a cached user, trigger a background sync immediately
+    // Background sync if we have a cached user
     if (user) {
       syncUserProfile(user.email, user.uid);
     }
@@ -115,8 +118,8 @@ const App: React.FC = () => {
         google.accounts.id.initialize({
           client_id: CLIENT_ID,
           callback: handleCredentialResponse,
-          auto_select: true, // Only if previously authorized
-          use_fedcm_for_prompt: true // Modern standard, prevents some popup blocks
+          auto_select: false, // User must click
+          use_fedcm_for_prompt: true 
         });
         
         tokenClientRef.current = google.accounts.oauth2.initTokenClient({
@@ -140,20 +143,8 @@ const App: React.FC = () => {
           gdriveInitialized = true;
         }
 
-        // --- FIX: NO AUTO-PROMPT IF ALREADY LOGGED IN ---
-        // If we already have the user in state, DO NOT show the One Tap prompt.
-        // If not logged in, we try to show it once.
-        if (!localStorage.getItem('mg_user_profile')) {
-          google.accounts.id.prompt((notification: any) => {
-            if (notification.isNotDisplayed()) {
-              console.log("One Tap not displayed:", notification.getNotDisplayedReason());
-              setIsInitialLoading(false);
-            }
-          });
-        } else {
-          // If we are logged in, just clear loading immediately
-          setIsInitialLoading(false);
-        }
+        // Always clear loading once Google SDK is ready (if not already cleared)
+        setIsInitialLoading(false);
       } catch (err) {
         console.error("Google script error:", err);
         setIsInitialLoading(false);
@@ -165,7 +156,7 @@ const App: React.FC = () => {
         setupGoogle();
         clearInterval(checkInterval);
       }
-    }, 200);
+    }, 100);
 
     return () => clearInterval(checkInterval);
   }, []);
@@ -173,23 +164,18 @@ const App: React.FC = () => {
   const handleLogin = () => {
     if (isGoogleBusy) return;
     setIsGoogleBusy(true);
-    // Safety timeout to reset busy state
-    const timeout = setTimeout(() => setIsGoogleBusy(false), 5000);
+    // Timeout safety
+    setTimeout(() => setIsGoogleBusy(false), 8000);
 
     try {
-      // Direct user gesture triggered request
       if (tokenClientRef.current) {
         tokenClientRef.current.requestAccessToken();
       } else if ((window as any).google?.accounts?.id) {
         google.accounts.id.prompt();
-      } else {
-        setIsGoogleBusy(false);
-        clearTimeout(timeout);
       }
     } catch (e) {
       console.error("Login trigger failed:", e);
       setIsGoogleBusy(false);
-      clearTimeout(timeout);
     }
   };
 
@@ -200,13 +186,17 @@ const App: React.FC = () => {
     connectToDrive(user?.email);
   };
 
+  // CORRECTED: Disconnect Drive without logging out of the app
+  const handleDisconnectDriveOnly = () => {
+    disconnectDrive();
+    setIsDriveConnected(false);
+    addLog("Disconnected from Google Drive.");
+  };
+
   const handleLogout = () => {
-    // 1. Remove Google session hints
     if ((window as any).google?.accounts?.id) {
       google.accounts.id.disableAutoSelect();
     }
-    
-    // 2. Clear local data
     setUser(null);
     disconnectDrive();
     setIsDriveConnected(false);
@@ -214,9 +204,6 @@ const App: React.FC = () => {
     localStorage.removeItem('mg_user_profile');
     localStorage.removeItem('drive_sticky_connection');
     addLog("Logged out.");
-    
-    // 3. Optional: reload to clean up Google state fully if needed
-    // window.location.reload(); 
   };
 
   const handleProcessAudio = async (mode: ProcessingMode) => {
@@ -240,7 +227,6 @@ const App: React.FC = () => {
       setAppState(AppState.COMPLETED);
       deleteSessionData(sessionIdRef.current).catch(() => {});
       
-      // Refresh user usage after processing
       syncUserProfile(user.email, user.uid);
 
       if (isDriveConnected) {
@@ -395,7 +381,7 @@ const App: React.FC = () => {
       <Header 
         isDriveConnected={isDriveConnected} 
         onConnectDrive={handleConnectDrive} 
-        onDisconnectDrive={handleLogout}
+        onDisconnectDrive={handleDisconnectDriveOnly} // Fixed: now separate from logout
         selectedModel={selectedModel}
         onModelChange={setSelectedModel}
         user={user}
