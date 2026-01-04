@@ -80,9 +80,9 @@ const App: React.FC = () => {
       localStorage.setItem('mg_user_profile', JSON.stringify(profile));
       localStorage.setItem('mg_logged_in', 'true');
       
-      // Auto-reconnect Drive SILENTLY if it was active
+      // Auto-reconnect Drive SILENTLY if it was previously active
       if (localStorage.getItem('drive_sticky_connection') === 'true') {
-        connectToDrive(email, true); // true = silent
+        connectToDrive(email, true); // true = silent, NO popup
       }
     } catch (err) {
       console.error("Profile sync error:", err);
@@ -180,7 +180,7 @@ const App: React.FC = () => {
     if (isGoogleBusy) return;
     setIsGoogleBusy(true);
     setTimeout(() => setIsGoogleBusy(false), 2000);
-    // User manual click = NOT silent (popup allowed)
+    // User manual click = NOT silent (popup allowed if needed)
     connectToDrive(user?.email, false);
   };
 

@@ -8,6 +8,7 @@ let accessToken: string | null = null;
 let mainFolderId: string | null = null;
 let folderLock: Promise<string> | null = null;
 const subFolderCache: Record<string, string> = {};
+let globalStatusCallback: ((token: string | null) => void) | null = null;
 
 /**
  * Initializes the Drive token client.
@@ -19,6 +20,7 @@ export const initDrive = (callback: (token: string | null) => void) => {
   const clientId = env?.VITE_GOOGLE_CLIENT_ID;
 
   if (!clientId) return;
+  globalStatusCallback = callback;
 
   tokenClient = google.accounts.oauth2.initTokenClient({
     client_id: clientId, 
@@ -29,29 +31,52 @@ export const initDrive = (callback: (token: string | null) => void) => {
         localStorage.setItem('drive_token', accessToken);
         localStorage.setItem('drive_token_expiry', (Date.now() + tokenResponse.expires_in * 1000).toString());
         localStorage.setItem('drive_sticky_connection', 'true');
-        callback(accessToken);
+        if (globalStatusCallback) globalStatusCallback(accessToken);
       } else if (tokenResponse.error) {
-        console.warn("Drive silent connect failed:", tokenResponse.error);
-        callback(null);
+        console.warn("Drive silent connect status:", tokenResponse.error);
+        // If silent refresh fails (e.g. interaction_required), we just stop trying.
+        // We do NOT show a popup here.
+        if (globalStatusCallback) globalStatusCallback(null);
       }
     },
   });
 
+  // Check cache for existing valid token
   const storedToken = localStorage.getItem('drive_token');
   const expiry = localStorage.getItem('drive_token_expiry');
   
-  // If we have a valid cached token, use it immediately
   if (storedToken && expiry && Date.now() < (parseInt(expiry) - 60000)) { 
     accessToken = storedToken;
     callback(storedToken);
-  } else if (localStorage.getItem('drive_sticky_connection') === 'true') {
-    // Attempt a silent refresh if it was sticky but expired
-    setTimeout(() => {
-        tokenClient.requestAccessToken({ prompt: 'none' });
-    }, 500);
-    callback(null);
   } else {
+    // We don't have a valid token. If we had a sticky connection, 
+    // App.tsx will trigger a silent reconnect once the user email is available.
     callback(null);
+  }
+};
+
+/**
+ * Connect to drive. 
+ * @param emailHint Mandatory for silent refresh to work without popups.
+ * @param silent If true, strictly use prompt: 'none'.
+ */
+export const connectToDrive = (emailHint?: string, silent: boolean = false) => {
+  if (!tokenClient) return;
+  
+  const hint = emailHint || localStorage.getItem('drive_email_hint');
+  if (hint) {
+    localStorage.setItem('drive_email_hint', hint);
+  }
+
+  const requestConfig: any = {
+    hint: hint,
+    prompt: silent ? 'none' : '' // Empty string allows Google to decide if a popup is needed for consent
+  };
+
+  try {
+    tokenClient.requestAccessToken(requestConfig);
+  } catch (e) {
+    console.error("Drive request error:", e);
   }
 };
 
@@ -68,29 +93,17 @@ export const ensureValidToken = async (emailHint?: string): Promise<string | nul
   return new Promise((resolve) => {
     const originalCallback = tokenClient.callback;
     tokenClient.callback = (response: any) => {
+      tokenClient.callback = originalCallback; // Restore original
       if (originalCallback) originalCallback(response);
       resolve(response.access_token || null);
     };
     
-    // Always try silent first when ensuring a token for an automated task
+    // For background tasks, always try silent first
     tokenClient.requestAccessToken({ 
-      hint: emailHint, 
+      hint: emailHint || localStorage.getItem('drive_email_hint'), 
       prompt: 'none' 
     });
   });
-};
-
-/**
- * Connect to drive. 
- * @param silent If true, no popup will be shown. Will fail if user interaction is needed.
- */
-export const connectToDrive = (emailHint?: string, silent: boolean = false) => {
-  if (tokenClient) {
-    tokenClient.requestAccessToken({ 
-      hint: emailHint,
-      prompt: silent ? 'none' : (emailHint ? '' : 'select_account')
-    });
-  }
 };
 
 export const disconnectDrive = () => {
@@ -101,6 +114,8 @@ export const disconnectDrive = () => {
   localStorage.removeItem('drive_token');
   localStorage.removeItem('drive_token_expiry');
   localStorage.removeItem('drive_sticky_connection');
+  localStorage.removeItem('drive_email_hint');
+  if (globalStatusCallback) globalStatusCallback(null);
 };
 
 const getFolderId = async (token: string, name: string, parentId?: string): Promise<string | null> => {
