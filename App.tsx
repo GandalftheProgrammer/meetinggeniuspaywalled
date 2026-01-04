@@ -3,15 +3,21 @@ import React, { useState, useEffect, useRef } from 'react';
 import Header from './components/Header';
 import Recorder from './components/Recorder';
 import Results from './components/Results';
+import Footer from './components/Footer';
+import PrivacyPolicy from './components/PrivacyPolicy';
+import TermsOfService from './components/TermsOfService';
 import { AppState, MeetingData, ProcessingMode, GeminiModel, UserProfile } from './types';
 import { processMeetingAudio } from './services/geminiService';
 import { initDrive, connectToDrive, uploadAudioToDrive, uploadTextToDrive, disconnectDrive } from './services/driveService';
-import { saveChunkToDB, getChunksForSession, getPendingSessions, deleteSessionData } from './services/db';
+import { saveChunkToDB, deleteSessionData } from './services/db';
 import { AlertCircle } from 'lucide-react';
 
 declare const google: any;
 
+type View = 'main' | 'privacy' | 'terms';
+
 const App: React.FC = () => {
+  const [view, setView] = useState<View>('main');
   const [appState, setAppState] = useState<AppState>(AppState.IDLE);
   const [title, setTitle] = useState<string>("");
   const [selectedModel, setSelectedModel] = useState<GeminiModel>('gemini-3-flash-preview');
@@ -38,7 +44,11 @@ const App: React.FC = () => {
     setDebugLogs(prev => [...prev, `${new Date().toLocaleTimeString('en-GB')} - ${msg}`]);
   };
 
-  // Strictly follow: [day] [Month] at [HH]h[MM]m
+  const handleNavigate = (newView: View) => {
+    setView(newView);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   const formatMeetingDateTime = (date: Date) => {
     const day = date.getDate();
     const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -57,7 +67,6 @@ const App: React.FC = () => {
       setUser(profile);
       addLog(`User profile synced: ${email}`);
       
-      // Clean up Stripe session params if present
       const urlParams = new URLSearchParams(window.location.search);
       if (urlParams.has('session_id')) {
         window.history.replaceState({}, document.title, window.location.pathname);
@@ -80,7 +89,7 @@ const App: React.FC = () => {
       google.accounts.id.initialize({
         client_id: CLIENT_ID,
         callback: handleCredentialResponse,
-        auto_select: true, // Crucial for Stripe return
+        auto_select: true,
         use_fedcm_for_prompt: false,
         itp_support: true
       });
@@ -206,7 +215,6 @@ const App: React.FC = () => {
       setAppState(AppState.COMPLETED);
       deleteSessionData(sessionIdRef.current).catch(() => {});
       
-      // Auto sync to drive if connected
       if (isDriveConnected) {
         autoSyncToDrive(newData, finalTitle, combinedBlob);
       }
@@ -221,7 +229,6 @@ const App: React.FC = () => {
     const startTime = sessionStartTime || new Date();
     const dateTimeStr = formatMeetingDateTime(startTime);
     const cleanTitle = currentTitle.replace(/[()]/g, '').trim();
-    // Strictly formatted base name: [Titel] on [Datum] at [Tijd]
     const safeBaseName = `${cleanTitle} on ${dateTimeStr}`;
 
     addLog("Auto-syncing results to Google Drive...");
@@ -259,6 +266,37 @@ const App: React.FC = () => {
     setCurrentRecordingSeconds(0);
   };
 
+  const renderMainView = () => (
+    <div className="flex flex-col items-center space-y-8 animate-in fade-in duration-500">
+      <div className="w-full max-w-lg space-y-2">
+        <label htmlFor="title" className="block text-sm font-semibold text-slate-600 ml-1">Meeting Title</label>
+        <input
+          type="text"
+          id="title"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          placeholder="Meeting Title"
+          className="w-full px-4 py-3 rounded-xl border border-slate-200 shadow-sm focus:ring-2 focus:ring-blue-500 outline-none"
+          disabled={appState === AppState.PROCESSING || appState === AppState.RECORDING}
+        />
+      </div>
+      <Recorder 
+        appState={appState}
+        onChunkReady={handleChunkReady}
+        onProcessAudio={handleProcessAudio}
+        onDiscard={handleDiscard}
+        onRecordingChange={handleRecordingChange}
+        onFileUpload={handleFileUpload}
+        audioUrl={audioUrl}
+        debugLogs={debugLogs}
+        user={user}
+        onUpgrade={handleUpgrade}
+        onLogin={handleLogin}
+        onRecordingTick={setCurrentRecordingSeconds}
+      />
+    </div>
+  );
+
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
       <Header 
@@ -273,57 +311,40 @@ const App: React.FC = () => {
         onUpgrade={handleUpgrade}
         currentRecordingSeconds={currentRecordingSeconds}
       />
+      
       <main className="flex-1 w-full max-w-7xl mx-auto px-4 py-8 md:py-12">
-        {error && (
-          <div className="max-w-md mx-auto mb-8 p-4 bg-red-50 border border-red-200 text-red-700 rounded-xl text-center text-sm font-medium shadow-sm animate-in fade-in zoom-in duration-300">
-            <div className="flex items-center justify-center gap-2 mb-1">
-              <AlertCircle className="w-4 h-4" />
-              <span className="font-bold">Error</span>
-            </div>
-            {error}
-          </div>
-        )}
+        {view === 'main' ? (
+          <>
+            {error && (
+              <div className="max-w-md mx-auto mb-8 p-4 bg-red-50 border border-red-200 text-red-700 rounded-xl text-center text-sm font-medium shadow-sm animate-in fade-in zoom-in duration-300">
+                <div className="flex items-center justify-center gap-2 mb-1">
+                  <AlertCircle className="w-4 h-4" />
+                  <span className="font-bold">Error</span>
+                </div>
+                {error}
+              </div>
+            )}
 
-        {appState !== AppState.COMPLETED && (
-          <div className="flex flex-col items-center space-y-8 animate-in fade-in duration-500">
-            <div className="w-full max-w-lg space-y-2">
-              <label htmlFor="title" className="block text-sm font-semibold text-slate-600 ml-1">Meeting Title</label>
-              <input
-                type="text"
-                id="title"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="Meeting Title"
-                className="w-full px-4 py-3 rounded-xl border border-slate-200 shadow-sm focus:ring-2 focus:ring-blue-500 outline-none"
-                disabled={appState === AppState.PROCESSING || appState === AppState.RECORDING}
-              />
-            </div>
-            <Recorder 
-              appState={appState}
-              onChunkReady={handleChunkReady}
-              onProcessAudio={handleProcessAudio}
-              onDiscard={handleDiscard}
-              onRecordingChange={handleRecordingChange}
-              onFileUpload={handleFileUpload}
-              audioUrl={audioUrl}
-              debugLogs={debugLogs}
-              user={user}
-              onUpgrade={handleUpgrade}
-              onLogin={handleLogin}
-              onRecordingTick={setCurrentRecordingSeconds}
-            />
-          </div>
-        )}
-        {appState === AppState.COMPLETED && meetingData && (
-          <Results 
-            data={meetingData} title={title} onReset={handleDiscard}
-            onGenerateMissing={() => {}} isProcessingMissing={false}
-            isDriveConnected={isDriveConnected} onConnectDrive={() => connectToDrive(user?.email)}
-            audioBlob={combinedBlob} initialMode={lastRequestedMode}
-            sessionDateString={sessionStartTime ? formatMeetingDateTime(sessionStartTime) : formatMeetingDateTime(new Date())}
-          />
+            {appState !== AppState.COMPLETED ? renderMainView() : (
+              meetingData && (
+                <Results 
+                  data={meetingData} title={title} onReset={handleDiscard}
+                  onGenerateMissing={() => {}} isProcessingMissing={false}
+                  isDriveConnected={isDriveConnected} onConnectDrive={() => connectToDrive(user?.email)}
+                  audioBlob={combinedBlob} initialMode={lastRequestedMode}
+                  sessionDateString={sessionStartTime ? formatMeetingDateTime(sessionStartTime) : formatMeetingDateTime(new Date())}
+                />
+              )
+            )}
+          </>
+        ) : view === 'privacy' ? (
+          <PrivacyPolicy onBack={() => handleNavigate('main')} />
+        ) : (
+          <TermsOfService onBack={() => handleNavigate('main')} />
         )}
       </main>
+
+      <Footer onNavigate={handleNavigate} />
     </div>
   );
 };
