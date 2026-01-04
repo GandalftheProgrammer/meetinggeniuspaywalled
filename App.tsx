@@ -10,7 +10,7 @@ import { AppState, MeetingData, ProcessingMode, GeminiModel, UserProfile } from 
 import { processMeetingAudio } from './services/geminiService';
 import { initDrive, connectToDrive, uploadAudioToDrive, uploadTextToDrive, disconnectDrive, ensureValidToken } from './services/driveService';
 import { saveChunkToDB, deleteSessionData } from './services/db';
-import { Zap, Shield, Cloud } from 'lucide-react';
+import { Zap, Shield, Cloud, Loader2 } from 'lucide-react';
 
 declare const google: any;
 
@@ -31,6 +31,7 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [user, setUser] = useState<UserProfile | null>(null);
   const [currentRecordingSeconds, setCurrentRecordingSeconds] = useState(0);
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
   
   const audioChunksRef = useRef<Blob[]>([]);
   const sessionIdRef = useRef<string>(`session_${Date.now()}`);
@@ -57,6 +58,8 @@ const App: React.FC = () => {
       });
       const profile = await res.json();
       setUser(profile);
+      localStorage.setItem('mg_logged_in', 'true');
+      localStorage.setItem('mg_last_email', email);
       
       // Auto-reconnect Drive if it was previously active
       if (localStorage.getItem('drive_sticky_connection') === 'true') {
@@ -64,6 +67,8 @@ const App: React.FC = () => {
       }
     } catch (err) {
       console.error("Profile sync error:", err);
+    } finally {
+      setIsInitialLoading(false);
     }
   };
 
@@ -75,10 +80,16 @@ const App: React.FC = () => {
     if (page === 'privacy') setView('privacy');
     if (page === 'terms') setView('terms');
 
+    // Safety fallback for loading screen (max 4 seconds)
+    const loadingTimeout = setTimeout(() => {
+      setIsInitialLoading(false);
+    }, 4000);
+
     const handleCredentialResponse = async (response: any) => {
       const decoded = JSON.parse(atob(response.credential.split('.')[1]));
       fetchUserProfile(decoded.email, decoded.sub);
       setIsGoogleBusy(false);
+      clearTimeout(loadingTimeout);
     };
 
     const CLIENT_ID = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID;
@@ -86,38 +97,54 @@ const App: React.FC = () => {
     const setupGoogle = () => {
       if (!(window as any).google || googleInitialized) return;
       
-      google.accounts.id.initialize({
-        client_id: CLIENT_ID,
-        callback: handleCredentialResponse,
-        auto_select: true,
-        use_fedcm_for_prompt: false
-      });
-      
-      tokenClientRef.current = google.accounts.oauth2.initTokenClient({
-        client_id: CLIENT_ID,
-        scope: 'email profile openid',
-        callback: async (tokenResponse: any) => {
-          if (tokenResponse.access_token) {
-            const info = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-              headers: { Authorization: `Bearer ${tokenResponse.access_token}` }
-            }).then(r => r.json());
-            fetchUserProfile(info.email, info.sub);
-          }
-          setIsGoogleBusy(false);
-        },
-      });
+      try {
+        google.accounts.id.initialize({
+          client_id: CLIENT_ID,
+          callback: handleCredentialResponse,
+          auto_select: true,
+          use_fedcm_for_prompt: false
+        });
+        
+        tokenClientRef.current = google.accounts.oauth2.initTokenClient({
+          client_id: CLIENT_ID,
+          scope: 'email profile openid',
+          callback: async (tokenResponse: any) => {
+            if (tokenResponse.access_token) {
+              const info = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+                headers: { Authorization: `Bearer ${tokenResponse.access_token}` }
+              }).then(r => r.json());
+              fetchUserProfile(info.email, info.sub);
+            }
+            setIsGoogleBusy(false);
+          },
+        });
 
-      googleInitialized = true;
-      
-      if (!gdriveInitialized) {
-        initDrive((token) => setIsDriveConnected(!!token));
-        gdriveInitialized = true;
-      }
+        googleInitialized = true;
+        
+        if (!gdriveInitialized) {
+          initDrive((token) => setIsDriveConnected(!!token));
+          gdriveInitialized = true;
+        }
 
-      // If returning from Stripe, we want to prioritize refreshing the user state
-      if (stripeSessionId) {
-        addLog("Syncing Pro status...");
-        // The fetchUserProfile will be triggered by auto-select or manual login
+        // Handle auto-login / One Tap
+        if (localStorage.getItem('mg_logged_in') === 'true') {
+          google.accounts.id.prompt((notification: any) => {
+            // If it's displayed, we should hide the loading screen so user sees the prompt overlay
+            // If it's skipped or not displayed, hide loading so user can use the manual button
+            if (notification.isDisplayed() || notification.isNotDisplayed() || notification.isSkippedMoment()) {
+              setIsInitialLoading(false);
+            }
+          });
+        } else {
+          setIsInitialLoading(false);
+        }
+
+        if (stripeSessionId) {
+          addLog("Syncing Pro status...");
+        }
+      } catch (err) {
+        console.error("Google script setup error:", err);
+        setIsInitialLoading(false);
       }
     };
 
@@ -128,22 +155,23 @@ const App: React.FC = () => {
       }
     }, 300);
 
-    return () => clearInterval(checkInterval);
+    return () => {
+      clearInterval(checkInterval);
+      clearTimeout(loadingTimeout);
+    };
   }, []);
 
-  /**
-   * Safe login wrapper with a self-healing timeout to prevent frozen buttons.
-   */
   const handleLogin = () => {
     if (isGoogleBusy) return;
     setIsGoogleBusy(true);
 
-    // Safety timeout: Reset the busy state if Google doesn't respond within 2 seconds
-    const timeout = setTimeout(() => setIsGoogleBusy(false), 2000);
+    const timeout = setTimeout(() => setIsGoogleBusy(false), 2500);
 
     try {
       if (tokenClientRef.current) {
-        tokenClientRef.current.requestAccessToken();
+        tokenClientRef.current.requestAccessToken({
+          hint: localStorage.getItem('mg_last_email') || ''
+        });
       } else if ((window as any).google?.accounts?.id) {
         google.accounts.id.prompt();
       } else {
@@ -157,9 +185,6 @@ const App: React.FC = () => {
     }
   };
 
-  /**
-   * Safe Drive connect with the same self-healing logic.
-   */
   const handleConnectDrive = () => {
     if (isGoogleBusy) return;
     setIsGoogleBusy(true);
@@ -171,6 +196,8 @@ const App: React.FC = () => {
     setUser(null);
     disconnectDrive();
     setIsDriveConnected(false);
+    localStorage.removeItem('mg_logged_in');
+    localStorage.removeItem('mg_last_email');
     addLog("Logged out.");
   };
 
@@ -252,6 +279,17 @@ const App: React.FC = () => {
     setView(newView);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
+
+  if (isInitialLoading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4 animate-in fade-in duration-300">
+          <Loader2 className="w-10 h-10 text-blue-600 animate-spin" />
+          <p className="text-slate-500 font-medium">Restoring session...</p>
+        </div>
+      </div>
+    );
+  }
 
   const renderMainView = () => (
     <div className="flex flex-col items-center space-y-8 animate-in fade-in duration-500">

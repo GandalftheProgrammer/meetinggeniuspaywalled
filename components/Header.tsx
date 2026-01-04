@@ -107,18 +107,20 @@ const Header: React.FC<HeaderProps> = ({
                     </div>
                 </div>
 
-                <button 
-                    onClick={isDriveConnected ? onDisconnectDrive : onConnectDrive}
-                    disabled={isLocked}
-                    className={`group flex items-center gap-2 px-3 py-1.5 rounded-full text-xs md:text-sm font-medium border transition-all shadow-sm shrink-0 disabled:opacity-50 disabled:cursor-not-allowed ${
-                        isDriveConnected 
-                        ? 'bg-green-50 border-green-200 text-green-700 hover:bg-red-50 hover:border-red-200 hover:text-red-600' 
-                        : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
-                    }`}
-                >
-                    {isDriveConnected ? <CheckCircle2 className="w-4 h-4" /> : <img src="https://upload.wikimedia.org/wikipedia/commons/1/12/Google_Drive_icon_%282020%29.svg" alt="GD" className="w-4 h-4" />}
-                    <span className="hidden sm:inline">{isDriveConnected ? 'Connected' : 'Drive'}</span>
-                </button>
+                {user && (
+                  <button 
+                      onClick={isDriveConnected ? onDisconnectDrive : onConnectDrive}
+                      disabled={isLocked}
+                      className={`group flex items-center gap-2 px-3 py-1.5 rounded-full text-xs md:text-sm font-medium border transition-all shadow-sm shrink-0 disabled:opacity-50 disabled:cursor-not-allowed ${
+                          isDriveConnected 
+                          ? 'bg-green-50 border-green-200 text-green-700 hover:bg-red-50 hover:border-red-200 hover:text-red-600' 
+                          : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+                      }`}
+                  >
+                      {isDriveConnected ? <CheckCircle2 className="w-4 h-4" /> : <img src="https://upload.wikimedia.org/wikipedia/commons/1/12/Google_Drive_icon_%282020%29.svg" alt="GD" className="w-4 h-4" />}
+                      <span className="hidden sm:inline">{isDriveConnected ? 'Connected' : 'Drive'}</span>
+                  </button>
+                )}
 
                 {user ? (
                    <button 
@@ -135,7 +137,7 @@ const Header: React.FC<HeaderProps> = ({
                     className="flex items-center gap-2 px-4 py-1.5 bg-blue-600 text-white rounded-full text-xs md:text-sm font-bold shadow-md hover:bg-blue-700 transition-all disabled:bg-slate-400 disabled:cursor-not-allowed"
                   >
                     <UserIcon className="w-4 h-4" />
-                    <span>{isLocked ? 'Checking...' : 'Sign In'}</span>
+                    <span>{isLocked ? 'Wait...' : 'Sign In'}</span>
                   </button>
                 )}
             </div>
