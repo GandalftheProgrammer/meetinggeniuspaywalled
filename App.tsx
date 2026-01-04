@@ -10,7 +10,7 @@ import { AppState, MeetingData, ProcessingMode, GeminiModel, UserProfile } from 
 import { processMeetingAudio } from './services/geminiService';
 import { initDrive, connectToDrive, uploadAudioToDrive, uploadTextToDrive, disconnectDrive } from './services/driveService';
 import { saveChunkToDB, deleteSessionData } from './services/db';
-import { AlertCircle, Zap, Shield, CloudSync } from 'lucide-react';
+import { AlertCircle, Zap, Shield, Cloud } from 'lucide-react';
 
 declare const google: any;
 
@@ -20,7 +20,7 @@ const App: React.FC = () => {
   const [view, setView] = useState<View>('main');
   const [appState, setAppState] = useState<AppState>(AppState.IDLE);
   const [title, setTitle] = useState<string>("");
-  const [selectedModel, setSelectedModel] = useState<GeminiModel>('gemini-3-flash-preview');
+  const [selectedModel, setSelectedModel] = useState<GeminiModel>('gemini-2.5-flash');
   const [lastRequestedMode, setLastRequestedMode] = useState<ProcessingMode>('NOTES_ONLY');
   
   const [meetingData, setMeetingData] = useState<MeetingData | null>(null);
@@ -103,11 +103,9 @@ const App: React.FC = () => {
         use_fedcm_for_prompt: false,
         itp_support: true
       });
-      // Do not prompt automatically if on privacy or terms pages
-      const params = new URLSearchParams(window.location.search);
-      if (!params.get('p')) {
-        google.accounts.id.prompt();
-      }
+      
+      // REMOVED: google.accounts.id.prompt() call. 
+      // We want the landing page to be passive and only trigger login on explicit user actions.
 
       tokenClientRef.current = google.accounts.oauth2.initTokenClient({
         client_id: CLIENT_ID,
@@ -300,7 +298,7 @@ const App: React.FC = () => {
         </div>
         <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 text-center">
           <div className="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center mx-auto mb-4">
-            <CloudSync className="w-6 h-6 text-green-600" />
+            <Cloud className="w-6 h-6 text-green-600" />
           </div>
           <h3 className="font-bold text-slate-800 mb-2">Drive Integration</h3>
           <p className="text-sm text-slate-500">Securely sync your transcripts and notes directly to your own Google Drive account.</p>
