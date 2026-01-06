@@ -224,10 +224,10 @@ const App: React.FC = () => {
 
   const handleLogout = () => {
     if ((window as any).google?.accounts?.id) google.accounts.id.disableAutoSelect();
-    const uid = user?.uid;
     setUser(null);
-    if (uid) disconnectDrive(uid); 
     setIsDriveConnected(false);
+    // Note: We deliberately don't call disconnectDrive(uid) here because we want 
+    // to keep the Drive link persistent in the backend profile for the next login.
     localStorage.removeItem('mg_logged_in');
     localStorage.removeItem('mg_user_profile');
     addLog("Logged out.");
