@@ -6,8 +6,15 @@ export interface AudioChunk {
   timestamp: number;
 }
 
+export interface SessionMetadata {
+  sessionId: string;
+  title: string;
+  lastUpdated: number;
+  duration: number;
+}
+
 const DB_NAME = 'MeetingGeniusDB';
-const DB_VERSION = 1;
+const DB_VERSION = 2; // Incremented version for new schema
 const CHUNK_STORE = 'audio_chunks';
 const SESSION_STORE = 'active_sessions';
 
@@ -31,7 +38,7 @@ export const initDB = (): Promise<IDBDatabase> => {
   });
 };
 
-export const saveChunkToDB = async (chunk: AudioChunk) => {
+export const saveChunkToDB = async (chunk: AudioChunk, duration: number) => {
   const db = await initDB();
   return new Promise<void>((resolve, reject) => {
     const transaction = db.transaction([CHUNK_STORE, SESSION_STORE], 'readwrite');
@@ -42,6 +49,7 @@ export const saveChunkToDB = async (chunk: AudioChunk) => {
     sessionStore.put({ 
         sessionId: chunk.sessionId, 
         lastUpdated: Date.now(),
+        duration: duration,
         title: localStorage.getItem(`title_${chunk.sessionId}`) || 'Untitled Meeting'
     });
 
@@ -67,16 +75,54 @@ export const getChunksForSession = async (sessionId: string): Promise<Blob[]> =>
   });
 };
 
-export const getPendingSessions = async (): Promise<{sessionId: string, title: string}[]> => {
+export const getPendingSessions = async (): Promise<SessionMetadata[]> => {
   const db = await initDB();
   return new Promise((resolve, reject) => {
     const transaction = db.transaction([SESSION_STORE], 'readonly');
     const store = transaction.objectStore(SESSION_STORE);
     const request = store.getAll();
 
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      // Return sessions updated in the last 48 hours
+      const fortyEightHoursAgo = Date.now() - (48 * 60 * 60 * 1000);
+      const results = (request.result as SessionMetadata[]).filter(s => s.lastUpdated > fortyEightHoursAgo);
+      resolve(results);
+    };
     request.onerror = () => reject(request.error);
   });
+};
+
+export const cleanupOldSessions = async (): Promise<void> => {
+    const db = await initDB();
+    const fortyEightHoursAgo = Date.now() - (48 * 60 * 60 * 1000);
+    
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction([SESSION_STORE, CHUNK_STORE], 'readwrite');
+        const sessionStore = transaction.objectStore(SESSION_STORE);
+        const chunkStore = transaction.objectStore(CHUNK_STORE);
+        
+        const request = sessionStore.getAll();
+        request.onsuccess = () => {
+            const sessions = request.result as SessionMetadata[];
+            sessions.forEach(s => {
+                if (s.lastUpdated < fortyEightHoursAgo) {
+                    sessionStore.delete(s.sessionId);
+                    // Also delete associated chunks
+                    const index = chunkStore.index('sessionId');
+                    const chunkRequest = index.openCursor(IDBKeyRange.only(s.sessionId));
+                    chunkRequest.onsuccess = (e) => {
+                        const cursor = (e.target as IDBRequest<IDBCursorWithValue>).result;
+                        if (cursor) {
+                            cursor.delete();
+                            cursor.continue();
+                        }
+                    };
+                }
+            });
+            resolve();
+        };
+        request.onerror = () => reject(request.error);
+    });
 };
 
 export const deleteSessionData = async (sessionId: string): Promise<void> => {

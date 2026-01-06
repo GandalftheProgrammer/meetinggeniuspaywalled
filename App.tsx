@@ -9,7 +9,7 @@ import TermsOfService from './components/TermsOfService';
 import { AppState, MeetingData, ProcessingMode, GeminiModel, UserProfile } from './types';
 import { processMeetingAudio } from './services/geminiService';
 import { initDrive, connectToDrive, uploadAudioToDrive, uploadTextToDrive, disconnectDrive, checkDriveStatus, getAccessToken, ensureValidToken } from './services/driveService';
-import { saveChunkToDB, deleteSessionData, getPendingSessions, getChunksForSession } from './services/db';
+import { saveChunkToDB, deleteSessionData, getPendingSessions, getChunksForSession, cleanupOldSessions } from './services/db';
 import { Zap, Shield, Cloud, Loader2 } from 'lucide-react';
 
 declare const google: any;
@@ -33,7 +33,7 @@ const App: React.FC = () => {
     } catch { return null; }
   });
 
-  const [isInitialLoading, setIsInitialLoading] = useState(true);
+  const [pendingSession, setPendingSession] = useState<{sessionId: string; title: string; duration: number} | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const sessionIdRef = useRef<string>(`session_${Date.now()}`);
   const [combinedBlob, setCombinedBlob] = useState<Blob | null>(null);
@@ -50,27 +50,41 @@ const App: React.FC = () => {
     setDebugLogs(prev => [...prev, `${new Date().toLocaleTimeString('en-GB')} - ${msg}`]);
   };
 
-  // --- SESSION RECOVERY LOGIC ---
-  const recoverSession = async () => {
+  // --- BACKGROUND RECOVERY CHECK ---
+  const checkForRecoverableSessions = async () => {
     try {
+      await cleanupOldSessions(); // First remove anything > 48h
       const pending = await getPendingSessions();
       if (pending && pending.length > 0) {
-        const latest = pending[pending.length - 1];
-        const chunks = await getChunksForSession(latest.sessionId);
-        
+        // Find the most recent one
+        const latest = pending.sort((a, b) => b.lastUpdated - a.lastUpdated)[0];
+        setPendingSession(latest);
+      }
+    } catch (err) {
+      console.error("Recovery check failed:", err);
+    }
+  };
+
+  const handleRecover = async () => {
+    if (!pendingSession) return;
+    try {
+        addLog("Recovering audio chunks from local storage...");
+        const chunks = await getChunksForSession(pendingSession.sessionId);
         if (chunks && chunks.length > 0) {
           const blob = new Blob(chunks, { type: chunks[0].type || 'audio/webm' });
-          sessionIdRef.current = latest.sessionId;
+          sessionIdRef.current = pendingSession.sessionId;
           audioChunksRef.current = chunks;
           setCombinedBlob(blob);
           setAudioUrl(URL.createObjectURL(blob));
-          setTitle(latest.title || "");
+          setTitle(pendingSession.title || "");
           setAppState(AppState.PAUSED);
-          addLog("Previous session recovered.");
+          setCurrentRecordingSeconds(pendingSession.duration);
+          setPendingSession(null);
+          addLog("Session successfully restored.");
         }
-      }
     } catch (err) {
-      console.error("Recovery failed:", err);
+        console.error("Recovery execution failed:", err);
+        setError("Failed to recover audio chunks.");
     }
   };
 
@@ -96,16 +110,11 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
-    const init = async () => {
-      // 1. Recover any lost audio first
-      await recoverSession();
-      
-      // 2. Sync user if possible
-      if (user) await syncUserProfile(user.email, user.uid);
-      
-      setIsInitialLoading(false);
-    };
-    init();
+    // 1. Check for recoverable sessions in background
+    checkForRecoverableSessions();
+    
+    // 2. Sync user if possible
+    if (user) syncUserProfile(user.email, user.uid);
 
     const params = new URLSearchParams(window.location.search);
     const page = params.get('p');
@@ -236,7 +245,6 @@ const App: React.FC = () => {
 
     addLog("Syncing to Google Drive...");
     try {
-        // PROACTIVE TOKEN RECOVERY
         const token = await ensureValidToken(user.uid);
         if (!token) {
           addLog("Drive connection needs re-auth.");
@@ -278,20 +286,11 @@ const App: React.FC = () => {
     setTitle("");
     setError(null);
     setCurrentRecordingSeconds(0);
+    setPendingSession(null);
+    checkForRecoverableSessions();
   };
 
   const handleNavigate = (newView: View) => { setView(newView); window.scrollTo({ top: 0, behavior: 'smooth' }); };
-
-  if (isInitialLoading) {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
-        <div className="flex flex-col items-center gap-4 animate-in fade-in duration-300">
-          <Loader2 className="w-10 h-10 text-blue-600 animate-spin" />
-          <p className="text-slate-500 font-medium">Initializing MeetingGenius...</p>
-        </div>
-      </div>
-    );
-  }
 
   const renderMainView = () => (
     <div className="flex flex-col items-center space-y-8 animate-in fade-in duration-500">
@@ -314,23 +313,28 @@ const App: React.FC = () => {
         appState={appState}
         onChunkReady={(c) => {
           audioChunksRef.current.push(c);
-          saveChunkToDB({ sessionId: sessionIdRef.current, index: audioChunksRef.current.length, chunk: c, timestamp: Date.now() });
+          saveChunkToDB(
+              { sessionId: sessionIdRef.current, index: audioChunksRef.current.length, chunk: c, timestamp: Date.now() },
+              currentRecordingSeconds
+          );
         }}
         onProcessAudio={handleProcessAudio}
         onDiscard={handleDiscard}
         onRecordingChange={(is) => {
           if (is) {
             if (!user) { handleLogin(); return; }
-            sessionIdRef.current = `session_${Date.now()}`;
-            audioChunksRef.current = [];
-            setSessionStartTime(new Date());
+            if (appState !== AppState.PAUSED) {
+                sessionIdRef.current = `session_${Date.now()}`;
+                audioChunksRef.current = [];
+                setSessionStartTime(new Date());
+                setCurrentRecordingSeconds(0);
+            }
             setAppState(AppState.RECORDING);
           } else if (appState === AppState.RECORDING) {
             setAppState(AppState.PAUSED);
             const blob = new Blob(audioChunksRef.current, { type: audioChunksRef.current[0]?.type || 'audio/webm' });
             setCombinedBlob(blob);
             setAudioUrl(URL.createObjectURL(blob));
-            setCurrentRecordingSeconds(0);
           }
         }}
         onFileUpload={(f) => {
@@ -349,6 +353,8 @@ const App: React.FC = () => {
         onLogin={handleLogin}
         onRecordingTick={setCurrentRecordingSeconds}
         isLocked={isGoogleBusy}
+        pendingRecovery={pendingSession}
+        onRecover={handleRecover}
       />
       {appState === AppState.IDLE && (
         <div className="w-full max-w-4xl mx-auto mt-20 border-t border-slate-200 pt-16 mb-20">

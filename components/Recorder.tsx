@@ -1,6 +1,6 @@
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { Square, Loader2, Trash2, Circle, ListChecks, FileText, Upload, AlertTriangle, Crown } from 'lucide-react';
+import { Square, Loader2, Trash2, Circle, ListChecks, FileText, Upload, AlertTriangle, Crown, RotateCcw } from 'lucide-react';
 import AudioVisualizer from './AudioVisualizer';
 import { AppState, ProcessingMode, UserProfile, FREE_LIMIT_SECONDS } from '../types';
 
@@ -20,6 +20,8 @@ interface RecorderProps {
   onLogin: () => void;
   onRecordingTick?: (seconds: number) => void;
   isLocked?: boolean;
+  pendingRecovery?: { sessionId: string; title: string; duration: number } | null;
+  onRecover: () => void;
 }
 
 type AudioSource = 'microphone' | 'system';
@@ -37,7 +39,9 @@ const Recorder: React.FC<RecorderProps> = ({
   onUpgrade,
   onLogin,
   onRecordingTick,
-  isLocked = false
+  isLocked = false,
+  pendingRecovery,
+  onRecover
 }) => {
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
@@ -151,7 +155,7 @@ const Recorder: React.FC<RecorderProps> = ({
       mediaRecorder.start(1000); 
       setIsRecording(true);
       onRecordingChange(true);
-      const startTime = Date.now();
+      const startTime = Date.now() - (recordingTime * 1000);
       timerRef.current = window.setInterval(() => { setRecordingTime(Math.floor((Date.now() - startTime) / 1000)); }, 1000);
     } catch (error) {
       console.error("Recording error:", error);
@@ -281,7 +285,7 @@ const Recorder: React.FC<RecorderProps> = ({
         </button>
         
         {!isRecording && !hasRecordedData && (
-            <div>
+            <div className="flex flex-col items-center gap-3">
                 <input type="file" accept="audio/*" ref={fileInputRef} onChange={handleFileSelect} className="hidden" />
                 <button 
                   onClick={() => fileInputRef.current?.click()} 
@@ -290,6 +294,15 @@ const Recorder: React.FC<RecorderProps> = ({
                 >
                     <Upload className="w-4 h-4" /> Upload Audio File
                 </button>
+
+                {pendingRecovery && (
+                  <button 
+                    onClick={onRecover} 
+                    className="flex items-center gap-2 text-orange-600 hover:text-orange-700 text-sm font-bold transition-all px-4 py-2 rounded-full bg-orange-50 hover:bg-orange-100 animate-in fade-in slide-in-from-top-2"
+                  >
+                      <RotateCcw className="w-4 h-4" /> Recover Previous Recording ({formatTime(pendingRecovery.duration)})
+                  </button>
+                )}
             </div>
         )}
         <p className="mt-2 text-slate-400 text-sm font-medium">
