@@ -22,6 +22,7 @@ interface RecorderProps {
   isLocked?: boolean;
   pendingRecovery?: { sessionId: string; title: string; duration: number } | null;
   onRecover: () => void;
+  recoveredSeconds?: number;
 }
 
 type AudioSource = 'microphone' | 'system';
@@ -41,7 +42,8 @@ const Recorder: React.FC<RecorderProps> = ({
   onRecordingTick,
   isLocked = false,
   pendingRecovery,
-  onRecover
+  onRecover,
+  recoveredSeconds = 0
 }) => {
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
@@ -57,6 +59,13 @@ const Recorder: React.FC<RecorderProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const silentAudioRef = useRef<HTMLAudioElement | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
+
+  // Zorg dat de recorder de tijd overneemt van de herstelde sessie
+  useEffect(() => {
+    if (!isRecording && recoveredSeconds >= 0) {
+      setRecordingTime(recoveredSeconds);
+    }
+  }, [recoveredSeconds, isRecording]);
 
   useEffect(() => {
     if (!navigator.mediaDevices?.getDisplayMedia || /Android|iPhone|iPad/i.test(navigator.userAgent)) {
@@ -190,8 +199,9 @@ const Recorder: React.FC<RecorderProps> = ({
   };
 
   const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
+    const s = isNaN(seconds) || seconds < 0 ? 0 : Math.floor(seconds);
+    const mins = Math.floor(s / 60);
+    const secs = s % 60;
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
@@ -298,15 +308,15 @@ const Recorder: React.FC<RecorderProps> = ({
                 {pendingRecovery && (
                   <button 
                     onClick={onRecover} 
-                    className="flex items-center gap-2 text-orange-600 hover:text-orange-700 text-sm font-bold transition-all px-4 py-2 rounded-full bg-orange-50 hover:bg-orange-100 animate-in fade-in slide-in-from-top-2"
+                    className="flex items-center gap-2 text-slate-500 hover:text-blue-600 text-sm font-medium transition-colors px-4 py-2 rounded-full hover:bg-blue-50"
                   >
-                      <RotateCcw className="w-4 h-4" /> Recover Previous Recording ({formatTime(pendingRecovery.duration)})
+                      <RotateCcw className="w-4 h-4" /> Recover Previous Recording
                   </button>
                 )}
             </div>
         )}
         <p className="mt-2 text-slate-400 text-sm font-medium">
-          {isRecording ? "Recording..." : isLocked ? "Waiting for Google..." : limitReached ? "Limit Reached" : hasRecordedData ? "Paused" : "Start Recording"}
+          {isRecording ? "Recording..." : isLocked ? "Waiting for Google..." : limitReached ? "Limit Reached" : hasRecordedData ? "Paused" : ""}
         </p>
       </div>
 

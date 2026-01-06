@@ -71,14 +71,20 @@ const App: React.FC = () => {
         addLog("Recovering audio chunks from local storage...");
         const chunks = await getChunksForSession(pendingSession.sessionId);
         if (chunks && chunks.length > 0) {
-          const blob = new Blob(chunks, { type: chunks[0].type || 'audio/webm' });
+          const type = chunks[0].type || 'audio/webm';
+          const blob = new Blob(chunks, { type });
+          
           sessionIdRef.current = pendingSession.sessionId;
           audioChunksRef.current = chunks;
           setCombinedBlob(blob);
-          setAudioUrl(URL.createObjectURL(blob));
+          
+          if (audioUrl) URL.revokeObjectURL(audioUrl);
+          const newUrl = URL.createObjectURL(blob);
+          setAudioUrl(newUrl);
+          
           setTitle(pendingSession.title || "");
-          setAppState(AppState.PAUSED);
           setCurrentRecordingSeconds(pendingSession.duration);
+          setAppState(AppState.PAUSED);
           setPendingSession(null);
           addLog("Session successfully restored.");
         }
@@ -334,6 +340,7 @@ const App: React.FC = () => {
             setAppState(AppState.PAUSED);
             const blob = new Blob(audioChunksRef.current, { type: audioChunksRef.current[0]?.type || 'audio/webm' });
             setCombinedBlob(blob);
+            if (audioUrl) URL.revokeObjectURL(audioUrl);
             setAudioUrl(URL.createObjectURL(blob));
           }
         }}
@@ -341,6 +348,7 @@ const App: React.FC = () => {
           if (!user) { handleLogin(); return; }
           audioChunksRef.current = [];
           setCombinedBlob(f);
+          if (audioUrl) URL.revokeObjectURL(audioUrl);
           setAudioUrl(URL.createObjectURL(f));
           setAppState(AppState.PAUSED);
           setSessionStartTime(new Date(f.lastModified));
@@ -355,6 +363,7 @@ const App: React.FC = () => {
         isLocked={isGoogleBusy}
         pendingRecovery={pendingSession}
         onRecover={handleRecover}
+        recoveredSeconds={currentRecordingSeconds}
       />
       {appState === AppState.IDLE && (
         <div className="w-full max-w-4xl mx-auto mt-20 border-t border-slate-200 pt-16 mb-20">
