@@ -50,13 +50,31 @@ const App: React.FC = () => {
     setDebugLogs(prev => [...prev, `${new Date().toLocaleTimeString('en-GB')} - ${msg}`]);
   };
 
+  // Functie om de werkelijke audio-duur te meten
+  const getAudioDuration = (blob: Blob): Promise<number> => {
+    return new Promise((resolve) => {
+      const audio = new Audio();
+      const url = URL.createObjectURL(blob);
+      audio.src = url;
+      audio.onloadedmetadata = () => {
+        resolve(audio.duration);
+        URL.revokeObjectURL(url);
+      };
+      audio.onerror = () => {
+        resolve(0);
+        URL.revokeObjectURL(url);
+      };
+      // Timeout fallback
+      setTimeout(() => resolve(0), 2000);
+    });
+  };
+
   // --- BACKGROUND RECOVERY CHECK ---
   const checkForRecoverableSessions = async () => {
     try {
       await cleanupOldSessions(); // First remove anything > 48h
       const pending = await getPendingSessions();
       if (pending && pending.length > 0) {
-        // Find the most recent one
         const latest = pending.sort((a, b) => b.lastUpdated - a.lastUpdated)[0];
         setPendingSession(latest);
       }
@@ -68,11 +86,15 @@ const App: React.FC = () => {
   const handleRecover = async () => {
     if (!pendingSession) return;
     try {
+        setIsGoogleBusy(true); // Blokkeer UI tijdens berekenen
         addLog("Recovering audio chunks from local storage...");
         const chunks = await getChunksForSession(pendingSession.sessionId);
         if (chunks && chunks.length > 0) {
           const type = chunks[0].type || 'audio/webm';
           const blob = new Blob(chunks, { type });
+          
+          // Bepaal de werkelijke tijd uit de blob
+          const actualDuration = await getAudioDuration(blob);
           
           sessionIdRef.current = pendingSession.sessionId;
           audioChunksRef.current = chunks;
@@ -83,7 +105,7 @@ const App: React.FC = () => {
           setAudioUrl(newUrl);
           
           setTitle(pendingSession.title || "");
-          setCurrentRecordingSeconds(pendingSession.duration);
+          setCurrentRecordingSeconds(actualDuration > 0 ? actualDuration : pendingSession.duration);
           setAppState(AppState.PAUSED);
           setPendingSession(null);
           addLog("Session successfully restored.");
@@ -91,6 +113,8 @@ const App: React.FC = () => {
     } catch (err) {
         console.error("Recovery execution failed:", err);
         setError("Failed to recover audio chunks.");
+    } finally {
+        setIsGoogleBusy(false);
     }
   };
 
@@ -116,10 +140,7 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
-    // 1. Check for recoverable sessions in background
     checkForRecoverableSessions();
-    
-    // 2. Sync user if possible
     if (user) syncUserProfile(user.email, user.uid);
 
     const params = new URLSearchParams(window.location.search);
@@ -228,7 +249,6 @@ const App: React.FC = () => {
       setMeetingData(newData);
       setAppState(AppState.COMPLETED);
       
-      // Cleanup IndexedDB only after success
       deleteSessionData(sessionIdRef.current).catch(() => {});
       syncUserProfile(user.email, user.uid);
 

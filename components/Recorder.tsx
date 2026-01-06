@@ -60,9 +60,9 @@ const Recorder: React.FC<RecorderProps> = ({
   const silentAudioRef = useRef<HTMLAudioElement | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
-  // Zorg dat de recorder de tijd overneemt van de herstelde sessie
+  // Synchroniseer de timer direct bij herstel
   useEffect(() => {
-    if (!isRecording && recoveredSeconds >= 0) {
+    if (recoveredSeconds > 0 && !isRecording) {
       setRecordingTime(recoveredSeconds);
     }
   }, [recoveredSeconds, isRecording]);

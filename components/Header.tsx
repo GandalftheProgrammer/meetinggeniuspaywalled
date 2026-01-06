@@ -137,7 +137,7 @@ const Header: React.FC<HeaderProps> = ({
                 {user ? (
                    <button 
                     onClick={onLogout}
-                    className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-slate-100 text-slate-600 hover:bg-slate-200 transition-all border border-slate-200 text-xs md:text-sm font-bold shadow-sm"
+                    className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-slate-100 text-slate-600 hover:bg-slate-200 transition-all border border-slate-200 text-xs md:text-sm font-bold"
                    >
                      <UserIcon className="w-4 h-4" />
                      <span>Sign Out</span>
