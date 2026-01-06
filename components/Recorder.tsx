@@ -60,9 +60,9 @@ const Recorder: React.FC<RecorderProps> = ({
   const silentAudioRef = useRef<HTMLAudioElement | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
-  // Synchronize timer when recovery happens
+  // Sync internal timer when recovery happens
   useEffect(() => {
-    if (recoveredSeconds > 0 && !isRecording) {
+    if (recoveredSeconds >= 0 && !isRecording) {
       setRecordingTime(recoveredSeconds);
     }
   }, [recoveredSeconds, isRecording]);
@@ -276,7 +276,7 @@ const Recorder: React.FC<RecorderProps> = ({
       )}
 
       <div className={`w-full h-24 mb-6 bg-slate-50 rounded-xl flex items-center justify-center border border-slate-100 overflow-hidden relative`}>
-        {isRecording || hasRecordedData ? <AudioVisualizer stream={stream} isRecording={isRecording} /> : <div className="text-slate-400 text-sm font-medium">{isLocked ? 'Restoring...' : 'Ready to record'}</div>}
+        {isRecording || hasRecordedData ? <AudioVisualizer stream={stream} isRecording={isRecording} /> : <div className="text-slate-400 text-sm font-medium">{isLocked ? 'Restoring Session...' : 'Ready to record'}</div>}
       </div>
 
       <div className={`text-5xl font-mono font-semibold mb-8 tracking-wider ${isRecording ? 'text-red-500' : 'text-slate-700'}`}>

@@ -11,10 +11,11 @@ export interface SessionMetadata {
   title: string;
   lastUpdated: number;
   duration: number;
+  startTime: string; // Added to persist the "Recorded on" date
 }
 
 const DB_NAME = 'MeetingGeniusDB';
-const DB_VERSION = 2; // Incremented version for new schema
+const DB_VERSION = 3; // Bumped version for schema update
 const CHUNK_STORE = 'audio_chunks';
 const SESSION_STORE = 'active_sessions';
 
@@ -38,7 +39,7 @@ export const initDB = (): Promise<IDBDatabase> => {
   });
 };
 
-export const saveChunkToDB = async (chunk: AudioChunk, duration: number) => {
+export const saveChunkToDB = async (chunk: AudioChunk, duration: number, startTime: string) => {
   const db = await initDB();
   return new Promise<void>((resolve, reject) => {
     const transaction = db.transaction([CHUNK_STORE, SESSION_STORE], 'readwrite');
@@ -49,7 +50,8 @@ export const saveChunkToDB = async (chunk: AudioChunk, duration: number) => {
     sessionStore.put({ 
         sessionId: chunk.sessionId, 
         lastUpdated: Date.now(),
-        duration: duration,
+        duration: isNaN(duration) ? 0 : duration,
+        startTime: startTime,
         title: localStorage.getItem(`title_${chunk.sessionId}`) || 'Untitled Meeting'
     });
 
@@ -83,9 +85,8 @@ export const getPendingSessions = async (): Promise<SessionMetadata[]> => {
     const request = store.getAll();
 
     request.onsuccess = () => {
-      // Return sessions updated in the last 48 hours
-      const fortyEightHoursAgo = Date.now() - (48 * 60 * 60 * 1000);
-      const results = (request.result as SessionMetadata[]).filter(s => s.lastUpdated > fortyEightHoursAgo);
+      // Return all sessions, sorted by lastUpdated descending (most recent first)
+      const results = (request.result as SessionMetadata[]).sort((a, b) => b.lastUpdated - a.lastUpdated);
       resolve(results);
     };
     request.onerror = () => reject(request.error);
@@ -94,7 +95,8 @@ export const getPendingSessions = async (): Promise<SessionMetadata[]> => {
 
 export const cleanupOldSessions = async (): Promise<void> => {
     const db = await initDB();
-    const fortyEightHoursAgo = Date.now() - (48 * 60 * 60 * 1000);
+    // Increase cleanup limit to 7 days as requested (effectively "no limit" for daily users)
+    const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
     
     return new Promise((resolve, reject) => {
         const transaction = db.transaction([SESSION_STORE, CHUNK_STORE], 'readwrite');
@@ -105,9 +107,8 @@ export const cleanupOldSessions = async (): Promise<void> => {
         request.onsuccess = () => {
             const sessions = request.result as SessionMetadata[];
             sessions.forEach(s => {
-                if (s.lastUpdated < fortyEightHoursAgo) {
+                if (s.lastUpdated < sevenDaysAgo) {
                     sessionStore.delete(s.sessionId);
-                    // Also delete associated chunks
                     const index = chunkStore.index('sessionId');
                     const chunkRequest = index.openCursor(IDBKeyRange.only(s.sessionId));
                     chunkRequest.onsuccess = (e) => {
