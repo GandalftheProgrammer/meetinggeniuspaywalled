@@ -40,7 +40,8 @@ export const initDB = (): Promise<IDBDatabase> => {
 
 export const saveChunkToDB = async (chunk: AudioChunk, duration: number) => {
   const db = await initDB();
-  const validDuration = isNaN(duration) ? 0 : Math.max(0, duration);
+  // Zorg dat duration ALTIJD een geldig getal is
+  const safeDuration = isNaN(duration) || duration < 0 ? 0 : Math.floor(duration);
   
   return new Promise<void>((resolve, reject) => {
     const transaction = db.transaction([CHUNK_STORE, SESSION_STORE], 'readwrite');
@@ -51,7 +52,7 @@ export const saveChunkToDB = async (chunk: AudioChunk, duration: number) => {
     sessionStore.put({ 
         sessionId: chunk.sessionId, 
         lastUpdated: Date.now(),
-        duration: validDuration,
+        duration: safeDuration,
         title: localStorage.getItem(`title_${chunk.sessionId}`) || 'Untitled Meeting'
     });
 
@@ -70,6 +71,7 @@ export const getChunksForSession = async (sessionId: string): Promise<Blob[]> =>
 
     request.onsuccess = () => {
       const results = request.result as AudioChunk[];
+      // Sorteer op timestamp om de juiste volgorde te garanderen
       const sortedChunks = results.sort((a, b) => a.timestamp - b.timestamp).map(r => r.chunk);
       resolve(sortedChunks);
     };
@@ -87,7 +89,7 @@ export const getPendingSessions = async (): Promise<SessionMetadata[]> => {
     request.onsuccess = () => {
       const fortyEightHoursAgo = Date.now() - (48 * 60 * 60 * 1000);
       const results = (request.result as SessionMetadata[])
-        .filter(s => s.lastUpdated > fortyEightHoursAgo && s.duration > 2); // Minimum 2 seconds to be worth recovering
+        .filter(s => s.lastUpdated > fortyEightHoursAgo && s.duration > 1);
       resolve(results);
     };
     request.onerror = () => reject(request.error);

@@ -50,11 +50,13 @@ const App: React.FC = () => {
     setDebugLogs(prev => [...prev, `${new Date().toLocaleTimeString('en-GB')} - ${msg}`]);
   };
 
+  // --- BACKGROUND RECOVERY CHECK ---
   const checkForRecoverableSessions = async () => {
     try {
-      await cleanupOldSessions();
+      await cleanupOldSessions(); // Verwijder sessies > 48u
       const pending = await getPendingSessions();
       if (pending && pending.length > 0) {
+        // Neem de meest recente
         const latest = pending.sort((a, b) => b.lastUpdated - a.lastUpdated)[0];
         setPendingSession(latest);
       }
@@ -69,6 +71,7 @@ const App: React.FC = () => {
         addLog("Recovering audio chunks from local storage...");
         const chunks = await getChunksForSession(pendingSession.sessionId);
         if (chunks && chunks.length > 0) {
+          // Detecteer mimeType van de eerste chunk
           const type = chunks[0].type || 'audio/webm';
           const blob = new Blob(chunks, { type });
           
@@ -84,9 +87,9 @@ const App: React.FC = () => {
           setCurrentRecordingSeconds(pendingSession.duration);
           setAppState(AppState.PAUSED);
           setPendingSession(null);
-          addLog(`Session restored (${Math.floor(pendingSession.duration)}s).`);
+          addLog(`Session successfully restored (${Math.floor(pendingSession.duration)}s).`);
         } else {
-          addLog("Recovery failed: No chunks found.");
+          addLog("Recovery failed: No chunks found in database.");
           setPendingSession(null);
         }
     } catch (err) {
@@ -360,6 +363,7 @@ const App: React.FC = () => {
         isLocked={isGoogleBusy}
         pendingRecovery={pendingSession}
         onRecover={handleRecover}
+        recoveredSeconds={currentRecordingSeconds}
       />
       {appState === AppState.IDLE && (
         <div className="w-full max-w-4xl mx-auto mt-20 border-t border-slate-200 pt-16 mb-20">

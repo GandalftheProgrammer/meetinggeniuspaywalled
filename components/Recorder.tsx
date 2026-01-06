@@ -22,6 +22,7 @@ interface RecorderProps {
   isLocked?: boolean;
   pendingRecovery?: { sessionId: string; title: string; duration: number } | null;
   onRecover: () => void;
+  recoveredSeconds?: number;
 }
 
 type AudioSource = 'microphone' | 'system';
@@ -41,7 +42,8 @@ const Recorder: React.FC<RecorderProps> = ({
   onRecordingTick,
   isLocked = false,
   pendingRecovery,
-  onRecover
+  onRecover,
+  recoveredSeconds = 0
 }) => {
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
@@ -57,6 +59,13 @@ const Recorder: React.FC<RecorderProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const silentAudioRef = useRef<HTMLAudioElement | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
+
+  // Synchroniseer interne timer met recoveredSeconds vanuit de App
+  useEffect(() => {
+    if (recoveredSeconds > 0 && !isRecording) {
+      setRecordingTime(recoveredSeconds);
+    }
+  }, [recoveredSeconds, isRecording]);
 
   useEffect(() => {
     if (!navigator.mediaDevices?.getDisplayMedia || /Android|iPhone|iPad/i.test(navigator.userAgent)) {
