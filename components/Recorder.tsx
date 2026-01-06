@@ -60,7 +60,7 @@ const Recorder: React.FC<RecorderProps> = ({
   const silentAudioRef = useRef<HTMLAudioElement | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
-  // Synchroniseer de interne klok bij herstel
+  // Synchronize timer when recovery happens
   useEffect(() => {
     if (recoveredSeconds > 0 && !isRecording) {
       setRecordingTime(recoveredSeconds);
@@ -276,7 +276,7 @@ const Recorder: React.FC<RecorderProps> = ({
       )}
 
       <div className={`w-full h-24 mb-6 bg-slate-50 rounded-xl flex items-center justify-center border border-slate-100 overflow-hidden relative`}>
-        {isRecording || hasRecordedData ? <AudioVisualizer stream={stream} isRecording={isRecording} /> : <div className="text-slate-400 text-sm font-medium">Ready to record</div>}
+        {isRecording || hasRecordedData ? <AudioVisualizer stream={stream} isRecording={isRecording} /> : <div className="text-slate-400 text-sm font-medium">{isLocked ? 'Restoring...' : 'Ready to record'}</div>}
       </div>
 
       <div className={`text-5xl font-mono font-semibold mb-8 tracking-wider ${isRecording ? 'text-red-500' : 'text-slate-700'}`}>
@@ -291,7 +291,7 @@ const Recorder: React.FC<RecorderProps> = ({
             isRecording ? 'bg-slate-900 hover:bg-slate-800' : 'bg-red-500 hover:bg-red-600 disabled:bg-slate-300'
           }`}
         >
-          {isRecording ? <Square className="w-8 h-8 text-white fill-current" /> : <Circle className="w-8 h-8 text-white fill-current" />}
+          {isRecording ? <Square className="w-8 h-8 text-white fill-current" /> : isLocked ? <Loader2 className="w-8 h-8 text-white animate-spin" /> : <Circle className="w-8 h-8 text-white fill-current" />}
         </button>
         
         {!isRecording && !hasRecordedData && (
@@ -308,15 +308,16 @@ const Recorder: React.FC<RecorderProps> = ({
                 {pendingRecovery && (
                   <button 
                     onClick={onRecover} 
-                    className="flex items-center gap-2 text-slate-500 hover:text-blue-600 text-sm font-medium transition-colors px-4 py-2 rounded-full hover:bg-blue-50"
+                    disabled={isLocked}
+                    className="flex items-center gap-2 text-slate-500 hover:text-blue-600 text-sm font-medium transition-colors px-4 py-2 rounded-full hover:bg-blue-50 disabled:opacity-50"
                   >
-                      <RotateCcw className="w-4 h-4" /> Recover Previous Recording
+                      {isLocked ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />} Recover Previous Recording
                   </button>
                 )}
             </div>
         )}
-        <p className="mt-2 text-slate-400 text-sm font-medium">
-          {isRecording ? "Recording..." : isLocked ? "Waiting for Google..." : limitReached ? "Limit Reached" : hasRecordedData ? "Paused" : ""}
+        <p className="mt-2 text-slate-400 text-sm font-medium h-5">
+          {isRecording ? "Recording..." : isLocked ? "Please wait..." : limitReached ? "Limit Reached" : hasRecordedData ? "Paused" : ""}
         </p>
       </div>
 
