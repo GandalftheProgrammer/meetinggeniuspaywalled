@@ -8,8 +8,8 @@ import PrivacyPolicy from './components/PrivacyPolicy';
 import TermsOfService from './components/TermsOfService';
 import { AppState, MeetingData, ProcessingMode, GeminiModel, UserProfile } from './types';
 import { processMeetingAudio } from './services/geminiService';
-import { initDrive, connectToDrive, uploadAudioToDrive, uploadTextToDrive, disconnectDrive, checkDriveStatus, getAccessToken } from './services/driveService';
-import { saveChunkToDB, deleteSessionData } from './services/db';
+import { initDrive, connectToDrive, uploadAudioToDrive, uploadTextToDrive, disconnectDrive, checkDriveStatus, getAccessToken, ensureValidToken } from './services/driveService';
+import { saveChunkToDB, deleteSessionData, getPendingSessions, getChunksForSession } from './services/db';
 import { Zap, Shield, Cloud, Loader2 } from 'lucide-react';
 
 declare const google: any;
@@ -33,7 +33,7 @@ const App: React.FC = () => {
     } catch { return null; }
   });
 
-  const [isInitialLoading, setIsInitialLoading] = useState(() => !localStorage.getItem('mg_user_profile'));
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
   const audioChunksRef = useRef<Blob[]>([]);
   const sessionIdRef = useRef<string>(`session_${Date.now()}`);
   const [combinedBlob, setCombinedBlob] = useState<Blob | null>(null);
@@ -50,6 +50,30 @@ const App: React.FC = () => {
     setDebugLogs(prev => [...prev, `${new Date().toLocaleTimeString('en-GB')} - ${msg}`]);
   };
 
+  // --- SESSION RECOVERY LOGIC ---
+  const recoverSession = async () => {
+    try {
+      const pending = await getPendingSessions();
+      if (pending && pending.length > 0) {
+        const latest = pending[pending.length - 1];
+        const chunks = await getChunksForSession(latest.sessionId);
+        
+        if (chunks && chunks.length > 0) {
+          const blob = new Blob(chunks, { type: chunks[0].type || 'audio/webm' });
+          sessionIdRef.current = latest.sessionId;
+          audioChunksRef.current = chunks;
+          setCombinedBlob(blob);
+          setAudioUrl(URL.createObjectURL(blob));
+          setTitle(latest.title || "");
+          setAppState(AppState.PAUSED);
+          addLog("Previous session recovered.");
+        }
+      }
+    } catch (err) {
+      console.error("Recovery failed:", err);
+    }
+  };
+
   const syncUserProfile = async (email: string, uid: string) => {
     try {
       const res = await fetch('/.netlify/functions/get-user', {
@@ -63,23 +87,30 @@ const App: React.FC = () => {
       localStorage.setItem('mg_user_profile', JSON.stringify(profile));
       localStorage.setItem('mg_logged_in', 'true');
       
-      // AUTO-CONNECT CHECK (Server-side refresh token based)
       if (localStorage.getItem('mg_drive_connected') === 'true' && !getAccessToken()) {
         setIsConnectingDrive(true);
         await checkDriveStatus(uid);
         setIsConnectingDrive(false);
       }
     } catch (err) { console.error("Profile sync error:", err); } 
-    finally { setIsInitialLoading(false); }
   };
 
   useEffect(() => {
+    const init = async () => {
+      // 1. Recover any lost audio first
+      await recoverSession();
+      
+      // 2. Sync user if possible
+      if (user) await syncUserProfile(user.email, user.uid);
+      
+      setIsInitialLoading(false);
+    };
+    init();
+
     const params = new URLSearchParams(window.location.search);
     const page = params.get('p');
     if (page === 'privacy') setView('privacy');
     if (page === 'terms') setView('terms');
-
-    if (user) syncUserProfile(user.email, user.uid);
 
     const handleCredentialResponse = async (response: any) => {
       const decoded = JSON.parse(atob(response.credential.split('.')[1]));
@@ -114,11 +145,9 @@ const App: React.FC = () => {
         });
 
         googleInitialized = true;
-        initDrive(user?.uid, (token) => setIsDriveConnected(!!token));
-        setIsInitialLoading(false);
+        if (user?.uid) initDrive(user.uid, (token) => setIsDriveConnected(!!token));
       } catch (err) {
         console.error("Google script error:", err);
-        setIsInitialLoading(false);
       }
     };
 
@@ -128,7 +157,6 @@ const App: React.FC = () => {
     return () => clearInterval(checkInterval);
   }, []);
 
-  // Update drive init when user profile becomes available
   useEffect(() => {
     if (user?.uid && googleInitialized) {
       initDrive(user.uid, (token) => setIsDriveConnected(!!token));
@@ -184,6 +212,8 @@ const App: React.FC = () => {
       const newData = await processMeetingAudio(combinedBlob, combinedBlob.type || 'audio/webm', 'ALL', selectedModel, addLog, user.uid);
       setMeetingData(newData);
       setAppState(AppState.COMPLETED);
+      
+      // Cleanup IndexedDB only after success
       deleteSessionData(sessionIdRef.current).catch(() => {});
       syncUserProfile(user.email, user.uid);
 
@@ -197,6 +227,8 @@ const App: React.FC = () => {
   };
 
   const autoSyncToDrive = async (data: MeetingData, currentTitle: string, blob: Blob | null) => {
+    if (!user) return;
+    
     const startTime = sessionStartTime || new Date();
     const dateTimeStr = startTime.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }).replace(' at', '');
     const cleanTitle = currentTitle.replace(/[()]/g, '').trim();
@@ -204,17 +236,29 @@ const App: React.FC = () => {
 
     addLog("Syncing to Google Drive...");
     try {
+        // PROACTIVE TOKEN RECOVERY
+        const token = await ensureValidToken(user.uid);
+        if (!token) {
+          addLog("Drive connection needs re-auth.");
+          return;
+        }
+
         if (blob) {
+          addLog("Uploading audio...");
           const ext = blob.type.includes('wav') ? 'wav' : blob.type.includes('mp4') ? 'm4a' : 'webm';
-          await uploadAudioToDrive(`${safeBaseName} - audio.${ext}`, blob, user?.uid);
+          await uploadAudioToDrive(`${safeBaseName} - audio.${ext}`, blob, user.uid);
         }
+        
         if (data.summary || data.conclusions.length > 0) {
+          addLog("Uploading notes...");
           const md = `# ${cleanTitle} notes\n*Recorded on ${dateTimeStr}*\n\n${data.summary}\n\n## Conclusions\n${data.conclusions.map(i => `- ${i}`).join('\n')}\n\n## Action Items\n${data.actionItems.map(i => `- ${i}`).join('\n')}`;
-          await uploadTextToDrive(`${safeBaseName} - notes`, md, 'Notes', user?.uid);
+          await uploadTextToDrive(`${safeBaseName} - notes`, md, 'Notes', user.uid);
         }
+        
         if (data.transcription?.trim()) {
+          addLog("Uploading transcript...");
           const tmd = `# ${cleanTitle} transcript\n*Recorded on ${dateTimeStr}*\n\n${data.transcription}`;
-          await uploadTextToDrive(`${safeBaseName} - transcript`, tmd, 'Transcripts', user?.uid);
+          await uploadTextToDrive(`${safeBaseName} - transcript`, tmd, 'Transcripts', user.uid);
         }
         addLog("Drive sync completed.");
     } catch (e: any) {
@@ -243,7 +287,7 @@ const App: React.FC = () => {
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
         <div className="flex flex-col items-center gap-4 animate-in fade-in duration-300">
           <Loader2 className="w-10 h-10 text-blue-600 animate-spin" />
-          <p className="text-slate-500 font-medium">Restoring session...</p>
+          <p className="text-slate-500 font-medium">Initializing MeetingGenius...</p>
         </div>
       </div>
     );
@@ -257,7 +301,10 @@ const App: React.FC = () => {
           type="text"
           id="title"
           value={title}
-          onChange={(e) => setTitle(e.target.value)}
+          onChange={(e) => {
+            setTitle(e.target.value);
+            localStorage.setItem(`title_${sessionIdRef.current}`, e.target.value);
+          }}
           placeholder="Meeting Title"
           className="w-full px-4 py-3 rounded-xl border border-slate-200 shadow-sm focus:ring-2 focus:ring-blue-500 outline-none"
           disabled={appState === AppState.PROCESSING || appState === AppState.RECORDING}
