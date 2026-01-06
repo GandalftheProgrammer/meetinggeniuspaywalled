@@ -130,10 +130,14 @@ const App: React.FC = () => {
       localStorage.setItem('mg_user_profile', JSON.stringify(profile));
       localStorage.setItem('mg_logged_in', 'true');
       
+      // Explicitly check drive status and update UI state immediately
       if (localStorage.getItem('mg_drive_connected') === 'true' && !getAccessToken()) {
         setIsConnectingDrive(true);
-        await checkDriveStatus(uid);
+        const token = await checkDriveStatus(uid);
+        setIsDriveConnected(!!token);
         setIsConnectingDrive(false);
+      } else if (getAccessToken()) {
+        setIsDriveConnected(true);
       }
     } catch (err) { console.error("Profile sync error:", err); } 
   };
