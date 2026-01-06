@@ -294,35 +294,37 @@ const Recorder: React.FC<RecorderProps> = ({
           {isRecording ? <Square className="w-8 h-8 text-white fill-current" /> : isLocked ? <Loader2 className="w-8 h-8 text-white animate-spin" /> : <Circle className="w-8 h-8 text-white fill-current" />}
         </button>
         
-        {/* ACTION CONTAINER: Fixed height centered on buttons. No status text. */}
-        <div className="h-[80px] flex flex-col items-center justify-center w-full">
-            {!isRecording && !hasRecordedData && (
-                <div className="flex flex-col items-center gap-2 animate-in fade-in duration-300">
-                    <input type="file" accept="audio/*" ref={fileInputRef} onChange={handleFileSelect} className="hidden" />
-                    <button 
-                      onClick={() => fileInputRef.current?.click()} 
-                      disabled={isLocked}
-                      className="flex items-center gap-2 text-slate-500 hover:text-blue-600 text-sm font-medium transition-colors px-4 py-1.5 rounded-full hover:bg-blue-50 disabled:opacity-50"
-                    >
-                        <Upload className="w-4 h-4" /> Upload Audio File
-                    </button>
-
-                    {pendingRecovery && (
+        {/* ACTION CONTAINER: Fixed height only BEFORE and DURING recording. Disappears AFTER recording for clean review. */}
+        {!hasRecordedData && (
+          <div className="h-[80px] flex flex-col items-center justify-center w-full">
+              {!isRecording && (
+                  <div className="flex flex-col items-center gap-2 animate-in fade-in duration-300">
+                      <input type="file" accept="audio/*" ref={fileInputRef} onChange={handleFileSelect} className="hidden" />
                       <button 
-                        onClick={onRecover} 
+                        onClick={() => fileInputRef.current?.click()} 
                         disabled={isLocked}
                         className="flex items-center gap-2 text-slate-500 hover:text-blue-600 text-sm font-medium transition-colors px-4 py-1.5 rounded-full hover:bg-blue-50 disabled:opacity-50"
                       >
-                          {isLocked ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />} Recover Previous Recording
+                          <Upload className="w-4 h-4" /> Upload Audio File
                       </button>
-                    )}
-                </div>
-            )}
-        </div>
+
+                      {pendingRecovery && (
+                        <button 
+                          onClick={onRecover} 
+                          disabled={isLocked}
+                          className="flex items-center gap-2 text-slate-500 hover:text-blue-600 text-sm font-medium transition-colors px-4 py-1.5 rounded-full hover:bg-blue-50 disabled:opacity-50"
+                        >
+                            {isLocked ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />} Recover Previous Recording
+                        </button>
+                      )}
+                  </div>
+              )}
+          </div>
+        )}
       </div>
 
       {!isRecording && hasRecordedData && (
-        <div className="w-full border-t border-slate-100 pt-6 text-center mt-2">
+        <div className="w-full border-t border-slate-100 pt-6 text-center mt-2 animate-in slide-in-from-top-2 duration-300">
           {audioUrl && (
             <div className="w-full bg-slate-50 p-3 rounded-xl border border-slate-200 mb-6 flex flex-col gap-2">
               <span className="text-xs font-semibold text-slate-500 ml-1 uppercase text-left">Preview</span>

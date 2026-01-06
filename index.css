@@ -1,6 +1,12 @@
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Forceer scrollbar om horizontale 'jumps' te voorkomen */
+html {
+  overflow-y: scroll;
+}
 
 body {
   font-family: 'Roboto', sans-serif;

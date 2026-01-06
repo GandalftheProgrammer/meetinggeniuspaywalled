@@ -50,10 +50,6 @@ const App: React.FC = () => {
     setDebugLogs(prev => [...prev, `${new Date().toLocaleTimeString('en-GB')} - ${msg}`]);
   };
 
-  /**
-   * Accurate duration calculation using AudioContext decoding.
-   * This handles the "0:00" duration issue often found with raw WebM blobs.
-   */
   const getAccurateAudioDuration = async (blob: Blob): Promise<number> => {
     try {
       const arrayBuffer = await blob.arrayBuffer();
@@ -68,13 +64,11 @@ const App: React.FC = () => {
     }
   };
 
-  // --- BACKGROUND RECOVERY CHECK ---
   const checkForRecoverableSessions = async () => {
     try {
-      await cleanupOldSessions(); // Clean up very old data
+      await cleanupOldSessions();
       const pending = await getPendingSessions();
       if (pending && pending.length > 0) {
-        // Use the most recent session metadata found
         const latest = pending[0]; 
         setPendingSession(latest);
       } else {
@@ -95,11 +89,8 @@ const App: React.FC = () => {
         if (chunks && chunks.length > 0) {
           const type = chunks[0].type || 'audio/webm';
           const blob = new Blob(chunks, { type });
-          
-          addLog("Calculating accurate duration...");
           const actualDuration = await getAccurateAudioDuration(blob);
           
-          // Restore app state
           sessionIdRef.current = pendingSession.sessionId;
           audioChunksRef.current = chunks;
           setCombinedBlob(blob);
@@ -107,15 +98,11 @@ const App: React.FC = () => {
           if (audioUrl) URL.revokeObjectURL(audioUrl);
           const newUrl = URL.createObjectURL(blob);
           setAudioUrl(newUrl);
-          
           setTitle(pendingSession.title || "");
           
-          // CRITICAL: Restore the start time from the database
           if (pendingSession.startTime) {
               setSessionStartTime(new Date(pendingSession.startTime));
           }
-
-          // Use decoded duration if available, fallback to metadata duration
           setCurrentRecordingSeconds(actualDuration > 0 ? Math.floor(actualDuration) : pendingSession.duration);
           
           setAppState(AppState.PAUSED);
@@ -260,8 +247,6 @@ const App: React.FC = () => {
       const newData = await processMeetingAudio(combinedBlob, combinedBlob.type || 'audio/webm', 'ALL', selectedModel, addLog, user.uid);
       setMeetingData(newData);
       setAppState(AppState.COMPLETED);
-      
-      // Cleanup database on success
       deleteSessionData(sessionIdRef.current).catch(() => {});
       syncUserProfile(user.email, user.uid);
 
@@ -276,7 +261,6 @@ const App: React.FC = () => {
 
   const autoSyncToDrive = async (data: MeetingData, currentTitle: string, blob: Blob | null) => {
     if (!user) return;
-    
     const startTime = sessionStartTime || new Date();
     const dateTimeStr = startTime.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }).replace(' at', '');
     const cleanTitle = currentTitle.replace(/[()]/g, '').trim();
@@ -285,10 +269,7 @@ const App: React.FC = () => {
     addLog("Syncing to Google Drive...");
     try {
         const token = await ensureValidToken(user.uid);
-        if (!token) {
-          addLog("Drive connection needs re-auth.");
-          return;
-        }
+        if (!token) { addLog("Drive connection needs re-auth."); return; }
 
         if (blob) {
           addLog("Uploading audio...");
@@ -308,9 +289,7 @@ const App: React.FC = () => {
           await uploadTextToDrive(`${safeBaseName} - transcript`, tmd, 'Transcripts', user.uid);
         }
         addLog("Drive sync completed.");
-    } catch (e: any) {
-        addLog(`Drive error: ${e.message}`);
-    }
+    } catch (e: any) { addLog(`Drive error: ${e.message}`); }
   };
 
   const handleDiscard = async () => {
@@ -325,7 +304,7 @@ const App: React.FC = () => {
     setTitle("");
     setError(null);
     setCurrentRecordingSeconds(0);
-    setSessionStartTime(null); // Reset date
+    setSessionStartTime(null);
     setPendingSession(null);
     checkForRecoverableSessions();
   };
@@ -403,20 +382,21 @@ const App: React.FC = () => {
         onRecover={handleRecover}
         recoveredSeconds={currentRecordingSeconds}
       />
+      
       {appState === AppState.IDLE && (
-        <div className="w-full max-w-4xl mx-auto mt-20 border-t border-slate-200 pt-16 mb-20">
+        <div className="w-full max-w-4xl mx-auto mt-20 border-t border-slate-200 pt-16 mb-20 animate-in fade-in slide-in-from-bottom-4 duration-700">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-            <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 text-center">
+            <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 text-center hover:shadow-md transition-all">
               <Zap className="w-10 h-10 text-blue-600 mx-auto mb-4" />
               <h3 className="font-bold text-slate-800 mb-2">Instant Summaries</h3>
               <p className="text-sm text-slate-500">Record on phone or laptop to get structured notes and action items.</p>
             </div>
-            <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 text-center">
+            <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 text-center hover:shadow-md transition-all">
               <Cloud className="w-10 h-10 text-green-600 mx-auto mb-4" />
               <h3 className="font-bold text-slate-800 mb-2">Drive Integration</h3>
               <p className="text-sm text-slate-500">Securely sync your transcripts and notes directly to your own Google Drive.</p>
             </div>
-            <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 text-center">
+            <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 text-center hover:shadow-md transition-all">
               <Shield className="w-10 h-10 text-purple-600 mx-auto mb-4" />
               <h3 className="font-bold text-slate-800 mb-2">Privacy First</h3>
               <p className="text-sm text-slate-500">Your data is yours. We don’t store or sell your recordings.</p>
