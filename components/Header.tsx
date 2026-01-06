@@ -5,6 +5,7 @@ import { GeminiModel, UserProfile, FREE_LIMIT_SECONDS } from '../types';
 
 interface HeaderProps {
   isDriveConnected: boolean;
+  isConnectingDrive?: boolean;
   onConnectDrive: () => void;
   onDisconnectDrive: () => void;
   selectedModel: GeminiModel;
@@ -19,6 +20,7 @@ interface HeaderProps {
 
 const Header: React.FC<HeaderProps> = ({ 
   isDriveConnected, 
+  isConnectingDrive = false,
   onConnectDrive, 
   onDisconnectDrive,
   selectedModel,
@@ -89,7 +91,6 @@ const Header: React.FC<HeaderProps> = ({
             )}
 
             <div className="flex items-center gap-2">
-                {/* Model selector is now always visible */}
                 <div className="flex relative group shrink-0">
                   <div className="flex items-center gap-2 text-xs md:text-sm font-medium text-slate-600 bg-white px-2 md:px-3 py-1.5 rounded-full border border-slate-200 hover:border-slate-300 transition-colors shadow-sm">
                       <span className="hidden xs:inline">Model:</span>
@@ -111,15 +112,25 @@ const Header: React.FC<HeaderProps> = ({
                 {user && (
                   <button 
                       onClick={isDriveConnected ? onDisconnectDrive : onConnectDrive}
-                      disabled={isLocked}
+                      disabled={isLocked || isConnectingDrive}
                       className={`group flex items-center gap-2 px-3 py-1.5 rounded-full text-xs md:text-sm font-medium border transition-all shadow-sm shrink-0 disabled:opacity-50 disabled:cursor-not-allowed ${
                           isDriveConnected 
                           ? 'bg-green-50 border-green-200 text-green-700 hover:bg-red-50 hover:border-red-200 hover:text-red-600' 
-                          : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+                          : isConnectingDrive 
+                            ? 'bg-slate-50 border-slate-200 text-slate-400'
+                            : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
                       }`}
                   >
-                      {isDriveConnected ? <CheckCircle2 className="w-4 h-4" /> : <img src="https://upload.wikimedia.org/wikipedia/commons/1/12/Google_Drive_icon_%282020%29.svg" alt="GD" className="w-4 h-4" />}
-                      <span className="hidden sm:inline">{isDriveConnected ? 'Connected' : 'Drive'}</span>
+                      {isConnectingDrive ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : isDriveConnected ? (
+                        <CheckCircle2 className="w-4 h-4" />
+                      ) : (
+                        <img src="https://upload.wikimedia.org/wikipedia/commons/1/12/Google_Drive_icon_%282020%29.svg" alt="GD" className="w-4 h-4" />
+                      )}
+                      <span className="hidden sm:inline">
+                        {isConnectingDrive ? 'Connecting...' : isDriveConnected ? 'Connected' : 'Drive'}
+                      </span>
                   </button>
                 )}
 

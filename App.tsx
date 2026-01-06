@@ -8,7 +8,7 @@ import PrivacyPolicy from './components/PrivacyPolicy';
 import TermsOfService from './components/TermsOfService';
 import { AppState, MeetingData, ProcessingMode, GeminiModel, UserProfile } from './types';
 import { processMeetingAudio } from './services/geminiService';
-import { initDrive, connectToDrive, uploadAudioToDrive, uploadTextToDrive, disconnectDrive, ensureValidToken, getAccessToken } from './services/driveService';
+import { initDrive, connectToDrive, uploadAudioToDrive, uploadTextToDrive, disconnectDrive, checkDriveStatus, getAccessToken } from './services/driveService';
 import { saveChunkToDB, deleteSessionData } from './services/db';
 import { Zap, Shield, Cloud, Loader2 } from 'lucide-react';
 
@@ -17,7 +17,6 @@ declare const google: any;
 type View = 'main' | 'privacy' | 'terms';
 
 let googleInitialized = false;
-let gdriveInitialized = false;
 
 const App: React.FC = () => {
   const [view, setView] = useState<View>('main');
@@ -40,6 +39,7 @@ const App: React.FC = () => {
   const [combinedBlob, setCombinedBlob] = useState<Blob | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [isDriveConnected, setIsDriveConnected] = useState(false);
+  const [isConnectingDrive, setIsConnectingDrive] = useState(false);
   const [debugLogs, setDebugLogs] = useState<string[]>([]);
   const [sessionStartTime, setSessionStartTime] = useState<Date | null>(null);
   const [isGoogleBusy, setIsGoogleBusy] = useState(false);
@@ -62,12 +62,12 @@ const App: React.FC = () => {
       setUser(profile);
       localStorage.setItem('mg_user_profile', JSON.stringify(profile));
       localStorage.setItem('mg_logged_in', 'true');
-      localStorage.setItem('mg_drive_email_hint', email);
       
-      // AUTO-CONNECT AFTER LOGIN:
-      // Always try the silent connection flow first.
-      if (localStorage.getItem('mg_drive_intent') === 'true' && !getAccessToken()) {
-        connectToDrive(email);
+      // AUTO-CONNECT CHECK (Server-side refresh token based)
+      if (localStorage.getItem('mg_drive_connected') === 'true' && !getAccessToken()) {
+        setIsConnectingDrive(true);
+        await checkDriveStatus(uid);
+        setIsConnectingDrive(false);
       }
     } catch (err) { console.error("Profile sync error:", err); } 
     finally { setIsInitialLoading(false); }
@@ -114,10 +114,7 @@ const App: React.FC = () => {
         });
 
         googleInitialized = true;
-        if (!gdriveInitialized) {
-          initDrive((token) => setIsDriveConnected(!!token));
-          gdriveInitialized = true;
-        }
+        initDrive(user?.uid, (token) => setIsDriveConnected(!!token));
         setIsInitialLoading(false);
       } catch (err) {
         console.error("Google script error:", err);
@@ -131,6 +128,13 @@ const App: React.FC = () => {
     return () => clearInterval(checkInterval);
   }, []);
 
+  // Update drive init when user profile becomes available
+  useEffect(() => {
+    if (user?.uid && googleInitialized) {
+      initDrive(user.uid, (token) => setIsDriveConnected(!!token));
+    }
+  }, [user?.uid]);
+
   const handleLogin = () => {
     if (isGoogleBusy) return;
     setIsGoogleBusy(true);
@@ -142,24 +146,24 @@ const App: React.FC = () => {
   };
 
   const handleConnectDrive = () => {
-    if (isGoogleBusy) return;
-    setIsGoogleBusy(true);
-    setTimeout(() => setIsGoogleBusy(false), 2000);
-    
-    // Always triggers the silent-first flow
-    connectToDrive(user?.email);
+    if (isGoogleBusy || !user) return;
+    connectToDrive();
   };
 
-  const handleDisconnectDriveOnly = () => {
-    disconnectDrive(true);
+  const handleDisconnectDriveOnly = async () => {
+    if (!user) return;
+    setIsConnectingDrive(true);
+    await disconnectDrive(user.uid);
     setIsDriveConnected(false);
+    setIsConnectingDrive(false);
     addLog("Disconnected from Google Drive.");
   };
 
   const handleLogout = () => {
     if ((window as any).google?.accounts?.id) google.accounts.id.disableAutoSelect();
+    const uid = user?.uid;
     setUser(null);
-    disconnectDrive(false); 
+    if (uid) disconnectDrive(uid); 
     setIsDriveConnected(false);
     localStorage.removeItem('mg_logged_in');
     localStorage.removeItem('mg_user_profile');
@@ -183,7 +187,7 @@ const App: React.FC = () => {
       deleteSessionData(sessionIdRef.current).catch(() => {});
       syncUserProfile(user.email, user.uid);
 
-      if (localStorage.getItem('mg_drive_intent') === 'true') {
+      if (localStorage.getItem('mg_drive_connected') === 'true') {
         autoSyncToDrive(newData, finalTitle, combinedBlob);
       }
     } catch (apiError: any) {
@@ -202,15 +206,15 @@ const App: React.FC = () => {
     try {
         if (blob) {
           const ext = blob.type.includes('wav') ? 'wav' : blob.type.includes('mp4') ? 'm4a' : 'webm';
-          await uploadAudioToDrive(`${safeBaseName} - audio.${ext}`, blob);
+          await uploadAudioToDrive(`${safeBaseName} - audio.${ext}`, blob, user?.uid);
         }
         if (data.summary || data.conclusions.length > 0) {
           const md = `# ${cleanTitle} notes\n*Recorded on ${dateTimeStr}*\n\n${data.summary}\n\n## Conclusions\n${data.conclusions.map(i => `- ${i}`).join('\n')}\n\n## Action Items\n${data.actionItems.map(i => `- ${i}`).join('\n')}`;
-          await uploadTextToDrive(`${safeBaseName} - notes`, md, 'Notes');
+          await uploadTextToDrive(`${safeBaseName} - notes`, md, 'Notes', user?.uid);
         }
         if (data.transcription?.trim()) {
           const tmd = `# ${cleanTitle} transcript\n*Recorded on ${dateTimeStr}*\n\n${data.transcription}`;
-          await uploadTextToDrive(`${safeBaseName} - transcript`, tmd, 'Transcripts');
+          await uploadTextToDrive(`${safeBaseName} - transcript`, tmd, 'Transcripts', user?.uid);
         }
         addLog("Drive sync completed.");
     } catch (e: any) {
@@ -327,6 +331,7 @@ const App: React.FC = () => {
     <div className="min-h-screen bg-slate-50 flex flex-col">
       <Header 
         isDriveConnected={isDriveConnected} 
+        isConnectingDrive={isConnectingDrive}
         onConnectDrive={handleConnectDrive} 
         onDisconnectDrive={handleDisconnectDriveOnly} 
         selectedModel={selectedModel}

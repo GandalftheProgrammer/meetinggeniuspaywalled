@@ -1,17 +1,14 @@
 
-import { GoogleUser } from '../types';
+import { UserProfile } from '../types';
 
 declare const google: any;
 
-let tokenClient: any;
+let codeClient: any;
 let accessToken: string | null = null;
 let mainFolderId: string | null = null;
 let folderLock: Promise<string> | null = null;
 const subFolderCache: Record<string, string> = {};
 let globalStatusCallback: ((token: string | null) => void) | null = null;
-
-// Track if we are currently in an escalation flow to prevent loops
-let isEscalating = false;
 
 /**
  * Returns the current access token if available.
@@ -19,11 +16,11 @@ let isEscalating = false;
 export const getAccessToken = () => accessToken;
 
 /**
- * Initializes the Drive token client.
+ * Initializes the Drive code client.
  */
-export const initDrive = (callback: (token: string | null) => void) => {
+export const initDrive = (uid: string | undefined, callback: (token: string | null) => void) => {
   if (typeof google === 'undefined' || !google.accounts?.oauth2) return;
-  if (tokenClient) return;
+  if (codeClient) return;
 
   const env = (import.meta as any).env;
   const clientId = env?.VITE_GOOGLE_CLIENT_ID;
@@ -31,138 +28,106 @@ export const initDrive = (callback: (token: string | null) => void) => {
   if (!clientId) return;
   globalStatusCallback = callback;
 
-  tokenClient = google.accounts.oauth2.initTokenClient({
-    client_id: clientId, 
+  codeClient = google.accounts.oauth2.initCodeClient({
+    client_id: clientId,
     scope: 'https://www.googleapis.com/auth/drive.file',
-    callback: (tokenResponse: any) => {
-      if (tokenResponse.access_token) {
-        // Success!
-        isEscalating = false;
-        accessToken = tokenResponse.access_token;
-        localStorage.setItem('drive_token', accessToken);
-        localStorage.setItem('drive_token_expiry', (Date.now() + tokenResponse.expires_in * 1000).toString());
-        if (globalStatusCallback) globalStatusCallback(accessToken);
-      } else if (tokenResponse.error === 'interaction_required') {
-        // ESCALATION: Silent failed, so we MUST show the popup now.
-        // We only do this if we aren't already in the middle of an escalation.
-        if (!isEscalating) {
-          isEscalating = true;
-          tokenClient.requestAccessToken({ 
-            hint: localStorage.getItem('mg_drive_email_hint') || undefined, 
-            prompt: '' 
+    ux_mode: 'popup',
+    callback: async (response: any) => {
+      if (response.code && uid) {
+        // Send code to backend to exchange for refresh token
+        try {
+          const res = await fetch('/.netlify/functions/drive-handler', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'exchange_code', code: response.code, uid })
           });
+          const data = await res.json();
+          if (data.access_token) {
+            accessToken = data.access_token;
+            localStorage.setItem('mg_drive_connected', 'true');
+            if (globalStatusCallback) globalStatusCallback(accessToken);
+          }
+        } catch (err) {
+          console.error("Code exchange failed:", err);
+          if (globalStatusCallback) globalStatusCallback(null);
         }
-      } else {
-        // Other errors or user closed the popup
-        isEscalating = false;
-        accessToken = null;
-        if (globalStatusCallback) globalStatusCallback(null);
       }
     },
   });
-
-  // Handle Page Refresh: Check storage first
-  const storedToken = localStorage.getItem('drive_token');
-  const expiry = localStorage.getItem('drive_token_expiry');
-  
-  if (storedToken && expiry && Date.now() < (parseInt(expiry) - 60000)) {
-    accessToken = storedToken;
-    callback(storedToken);
-  } else if (localStorage.getItem('mg_drive_intent') === 'true') {
-    // No valid token, but user wants to be connected. Start the silent-first flow.
-    connectToDrive(localStorage.getItem('mg_drive_email_hint') || undefined);
-  } else {
-    callback(null);
-  }
 };
 
 /**
- * Connection flow. Always tries silent first. 
- * The callback handles escalation to popup if prompt:'none' fails.
+ * Triggers the official Google Auth popup to get a refresh token.
  */
-export const connectToDrive = (emailHint?: string) => {
-  if (!tokenClient) return;
-  
-  const hint = emailHint || localStorage.getItem('mg_drive_email_hint') || undefined;
-  
-  // Set intent and hint for future auto-connects
-  localStorage.setItem('mg_drive_intent', 'true');
-  if (hint) localStorage.setItem('mg_drive_email_hint', hint);
+export const connectToDrive = () => {
+  if (!codeClient) return;
+  codeClient.requestCode();
+};
 
-  isEscalating = false; // Reset state for a new request chain
-  tokenClient.requestAccessToken({
-    hint: hint,
-    prompt: 'none' 
-  });
+/**
+ * Passive check: Asks backend for a fresh access token using the stored refresh token.
+ * This never triggers a popup.
+ */
+export const checkDriveStatus = async (uid: string): Promise<string | null> => {
+  try {
+    const res = await fetch('/.netlify/functions/drive-handler', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'get_token', uid })
+    });
+    
+    if (res.ok) {
+      const data = await res.json();
+      if (data.access_token) {
+        accessToken = data.access_token;
+        localStorage.setItem('mg_drive_connected', 'true');
+        if (globalStatusCallback) globalStatusCallback(accessToken);
+        return accessToken;
+      }
+    }
+  } catch (err) {
+    console.error("Passive token check failed:", err);
+  }
+  
+  accessToken = null;
+  localStorage.removeItem('mg_drive_connected');
+  if (globalStatusCallback) globalStatusCallback(null);
+  return null;
 };
 
 /**
  * Ensures a valid token is available before a cloud task.
- * Uses the same silent-first escalation logic.
  */
-export const ensureValidToken = async (): Promise<string | null> => {
-  const expiry = localStorage.getItem('drive_token_expiry');
-  const storedToken = localStorage.getItem('drive_token');
-  const isExpired = !expiry || Date.now() > (parseInt(expiry) - 30000); 
-
-  if (!isExpired && storedToken) {
-    accessToken = storedToken;
-    return storedToken;
-  }
-  
-  if (!tokenClient) return null;
-
-  return new Promise((resolve) => {
-    // Temporarily swap the callback to resolve this promise
-    const originalCallback = tokenClient.callback;
-    
-    tokenClient.callback = (response: any) => {
-      if (response.access_token) {
-          accessToken = response.access_token;
-          localStorage.setItem('drive_token', accessToken);
-          localStorage.setItem('drive_token_expiry', (Date.now() + response.expires_in * 1000).toString());
-          if (globalStatusCallback) globalStatusCallback(accessToken);
-          tokenClient.callback = originalCallback; 
-          resolve(accessToken);
-      } else if (response.error === 'interaction_required') {
-          // Escalation is handled by the manual call below to keep logic clean
-          tokenClient.requestAccessToken({ 
-              hint: localStorage.getItem('mg_drive_email_hint') || undefined, 
-              prompt: '' 
-          });
-      } else {
-          tokenClient.callback = originalCallback;
-          resolve(null);
-      }
-    };
-    
-    tokenClient.requestAccessToken({ 
-      hint: localStorage.getItem('mg_drive_email_hint') || undefined, 
-      prompt: 'none' 
-    });
-  });
+export const ensureValidToken = async (uid?: string): Promise<string | null> => {
+  if (accessToken) return accessToken;
+  if (!uid) return null;
+  return await checkDriveStatus(uid);
 };
 
 /**
- * Disconnects drive and clears the user's persistent preference.
+ * Disconnects drive and informs the backend to remove the refresh token.
  */
-export const disconnectDrive = (clearIntent: boolean = true) => {
+export const disconnectDrive = async (uid: string) => {
   accessToken = null;
   mainFolderId = null;
   folderLock = null;
   Object.keys(subFolderCache).forEach(k => delete subFolderCache[k]);
-  localStorage.removeItem('drive_token');
-  localStorage.removeItem('drive_token_expiry');
+  localStorage.removeItem('mg_drive_connected');
   
-  if (clearIntent) {
-      localStorage.removeItem('mg_drive_intent');
-      localStorage.removeItem('mg_drive_email_hint');
+  try {
+    await fetch('/.netlify/functions/drive-handler', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'disconnect', uid })
+    });
+  } catch (e) {
+    console.error("Backend disconnect failed:", e);
   }
   
   if (globalStatusCallback) globalStatusCallback(null);
 };
 
-// --- Helper Functions for Drive operations remain unchanged ---
+// --- Helper Functions for Drive operations ---
 
 const getFolderId = async (token: string, name: string, parentId?: string): Promise<string | null> => {
   let q = `mimeType='application/vnd.google-apps.folder' and name='${name}' and trashed=false`;
@@ -245,9 +210,9 @@ const convertMarkdownToHtml = (md: string): string => {
 </html>`.trim();
 };
 
-const uploadFile = async (name: string, content: string | Blob, type: string, sub: string, toDoc: boolean): Promise<any> => {
-  let token = await ensureValidToken();
-  if (!token) throw new Error("Could not verify cloud access. Please check the Google popup.");
+const uploadFile = async (name: string, content: string | Blob, type: string, sub: string, toDoc: boolean, uid?: string): Promise<any> => {
+  let token = await ensureValidToken(uid);
+  if (!token) throw new Error("Drive connection lost. Please reconnect in the header.");
   
   const folderId = await ensureFolder(token, sub);
   const meta = { 
@@ -278,9 +243,10 @@ const uploadFile = async (name: string, content: string | Blob, type: string, su
   return await r.json();
 };
 
-export const uploadAudioToDrive = (name: string, blob: Blob) => {
+export const uploadAudioToDrive = (name: string, blob: Blob, uid?: string) => {
   const cleanType = (blob.type || 'audio/webm').split(';')[0].trim();
-  return uploadFile(name, blob, cleanType, 'Audio', false);
+  return uploadFile(name, blob, cleanType, 'Audio', false, uid);
 };
 
-export const uploadTextToDrive = (name: string, content: string, sub: 'Notes' | 'Transcripts') => uploadFile(name, convertMarkdownToHtml(content), 'text/html', sub, true);
+export const uploadTextToDrive = (name: string, content: string, sub: 'Notes' | 'Transcripts', uid?: string) => 
+  uploadFile(name, convertMarkdownToHtml(content), 'text/html', sub, true, uid);
