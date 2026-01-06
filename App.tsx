@@ -53,10 +53,10 @@ const App: React.FC = () => {
   // --- BACKGROUND RECOVERY CHECK ---
   const checkForRecoverableSessions = async () => {
     try {
-      await cleanupOldSessions(); // Verwijder sessies > 48u
+      await cleanupOldSessions(); // First remove anything > 48h
       const pending = await getPendingSessions();
       if (pending && pending.length > 0) {
-        // Neem de meest recente
+        // Find the most recent one
         const latest = pending.sort((a, b) => b.lastUpdated - a.lastUpdated)[0];
         setPendingSession(latest);
       }
@@ -71,26 +71,16 @@ const App: React.FC = () => {
         addLog("Recovering audio chunks from local storage...");
         const chunks = await getChunksForSession(pendingSession.sessionId);
         if (chunks && chunks.length > 0) {
-          // Detecteer mimeType van de eerste chunk
-          const type = chunks[0].type || 'audio/webm';
-          const blob = new Blob(chunks, { type });
-          
+          const blob = new Blob(chunks, { type: chunks[0].type || 'audio/webm' });
           sessionIdRef.current = pendingSession.sessionId;
           audioChunksRef.current = chunks;
           setCombinedBlob(blob);
-          
-          if (audioUrl) URL.revokeObjectURL(audioUrl);
-          const newUrl = URL.createObjectURL(blob);
-          setAudioUrl(newUrl);
-          
+          setAudioUrl(URL.createObjectURL(blob));
           setTitle(pendingSession.title || "");
-          setCurrentRecordingSeconds(pendingSession.duration);
           setAppState(AppState.PAUSED);
+          setCurrentRecordingSeconds(pendingSession.duration);
           setPendingSession(null);
-          addLog(`Session successfully restored (${Math.floor(pendingSession.duration)}s).`);
-        } else {
-          addLog("Recovery failed: No chunks found in database.");
-          setPendingSession(null);
+          addLog("Session successfully restored.");
         }
     } catch (err) {
         console.error("Recovery execution failed:", err);
@@ -120,7 +110,10 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
+    // 1. Check for recoverable sessions in background
     checkForRecoverableSessions();
+    
+    // 2. Sync user if possible
     if (user) syncUserProfile(user.email, user.uid);
 
     const params = new URLSearchParams(window.location.search);
@@ -229,6 +222,7 @@ const App: React.FC = () => {
       setMeetingData(newData);
       setAppState(AppState.COMPLETED);
       
+      // Cleanup IndexedDB only after success
       deleteSessionData(sessionIdRef.current).catch(() => {});
       syncUserProfile(user.email, user.uid);
 
@@ -340,7 +334,6 @@ const App: React.FC = () => {
             setAppState(AppState.PAUSED);
             const blob = new Blob(audioChunksRef.current, { type: audioChunksRef.current[0]?.type || 'audio/webm' });
             setCombinedBlob(blob);
-            if (audioUrl) URL.revokeObjectURL(audioUrl);
             setAudioUrl(URL.createObjectURL(blob));
           }
         }}
@@ -348,7 +341,6 @@ const App: React.FC = () => {
           if (!user) { handleLogin(); return; }
           audioChunksRef.current = [];
           setCombinedBlob(f);
-          if (audioUrl) URL.revokeObjectURL(audioUrl);
           setAudioUrl(URL.createObjectURL(f));
           setAppState(AppState.PAUSED);
           setSessionStartTime(new Date(f.lastModified));
@@ -363,7 +355,6 @@ const App: React.FC = () => {
         isLocked={isGoogleBusy}
         pendingRecovery={pendingSession}
         onRecover={handleRecover}
-        recoveredSeconds={currentRecordingSeconds}
       />
       {appState === AppState.IDLE && (
         <div className="w-full max-w-4xl mx-auto mt-20 border-t border-slate-200 pt-16 mb-20">
