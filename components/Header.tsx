@@ -115,7 +115,7 @@ const Header: React.FC<HeaderProps> = ({
                       disabled={isLocked || isConnectingDrive}
                       className={`group flex items-center gap-2 px-3 py-1.5 rounded-full text-xs md:text-sm font-medium border transition-all shadow-sm shrink-0 disabled:opacity-50 disabled:cursor-not-allowed ${
                           isDriveConnected 
-                          ? 'bg-green-50 border-green-200 text-green-700 hover:bg-red-50 hover:border-red-200 hover:text-red-600' 
+                          ? 'bg-green-50 border-green-200 text-green-700 md:hover:bg-red-50 md:hover:border-red-200 md:hover:text-red-600' 
                           : isConnectingDrive 
                             ? 'bg-slate-50 border-slate-200 text-slate-400'
                             : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'

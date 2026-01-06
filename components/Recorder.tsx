@@ -233,7 +233,7 @@ const Recorder: React.FC<RecorderProps> = ({
   }
 
   return (
-    <div className="relative w-full max-w-lg mx-auto bg-white rounded-2xl shadow-xl border border-slate-100 p-6 md:p-8 flex flex-col items-center transition-all">
+    <div className="relative w-full max-w-lg mx-auto bg-white rounded-2xl shadow-xl border border-slate-100 p-6 md:p-8 flex flex-col items-center transition-all overflow-hidden">
       
       {/* Limit Reached Overlay */}
       {limitReached && user && (
@@ -283,7 +283,7 @@ const Recorder: React.FC<RecorderProps> = ({
         {formatTime(recordingTime)}
       </div>
 
-      <div className="flex flex-col items-center justify-center w-full mb-6 gap-4">
+      <div className="flex flex-col items-center justify-center w-full gap-4">
         <button
           onClick={toggleRecording}
           disabled={(limitReached && !user?.isPro) || isLocked}
@@ -294,35 +294,35 @@ const Recorder: React.FC<RecorderProps> = ({
           {isRecording ? <Square className="w-8 h-8 text-white fill-current" /> : isLocked ? <Loader2 className="w-8 h-8 text-white animate-spin" /> : <Circle className="w-8 h-8 text-white fill-current" />}
         </button>
         
-        {!isRecording && !hasRecordedData && (
-            <div className="flex flex-col items-center gap-3">
-                <input type="file" accept="audio/*" ref={fileInputRef} onChange={handleFileSelect} className="hidden" />
-                <button 
-                  onClick={() => fileInputRef.current?.click()} 
-                  disabled={isLocked}
-                  className="flex items-center gap-2 text-slate-500 hover:text-blue-600 text-sm font-medium transition-colors px-4 py-2 rounded-full hover:bg-blue-50 disabled:opacity-50"
-                >
-                    <Upload className="w-4 h-4" /> Upload Audio File
-                </button>
+        {/* ACTION CONTAINER: Fixed height centered on buttons. No status text. */}
+        <div className="h-[80px] flex flex-col items-center justify-center w-full">
+            {!isRecording && !hasRecordedData && (
+                <div className="flex flex-col items-center gap-2 animate-in fade-in duration-300">
+                    <input type="file" accept="audio/*" ref={fileInputRef} onChange={handleFileSelect} className="hidden" />
+                    <button 
+                      onClick={() => fileInputRef.current?.click()} 
+                      disabled={isLocked}
+                      className="flex items-center gap-2 text-slate-500 hover:text-blue-600 text-sm font-medium transition-colors px-4 py-1.5 rounded-full hover:bg-blue-50 disabled:opacity-50"
+                    >
+                        <Upload className="w-4 h-4" /> Upload Audio File
+                    </button>
 
-                {pendingRecovery && (
-                  <button 
-                    onClick={onRecover} 
-                    disabled={isLocked}
-                    className="flex items-center gap-2 text-slate-500 hover:text-blue-600 text-sm font-medium transition-colors px-4 py-2 rounded-full hover:bg-blue-50 disabled:opacity-50"
-                  >
-                      {isLocked ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />} Recover Previous Recording
-                  </button>
-                )}
-            </div>
-        )}
-        <p className="mt-2 text-slate-400 text-sm font-medium h-5">
-          {isRecording ? "Recording..." : isLocked ? "Please wait..." : limitReached ? "Limit Reached" : hasRecordedData ? "Paused" : ""}
-        </p>
+                    {pendingRecovery && (
+                      <button 
+                        onClick={onRecover} 
+                        disabled={isLocked}
+                        className="flex items-center gap-2 text-slate-500 hover:text-blue-600 text-sm font-medium transition-colors px-4 py-1.5 rounded-full hover:bg-blue-50 disabled:opacity-50"
+                      >
+                          {isLocked ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />} Recover Previous Recording
+                      </button>
+                    )}
+                </div>
+            )}
+        </div>
       </div>
 
       {!isRecording && hasRecordedData && (
-        <div className="w-full border-t border-slate-100 pt-6 text-center">
+        <div className="w-full border-t border-slate-100 pt-6 text-center mt-2">
           {audioUrl && (
             <div className="w-full bg-slate-50 p-3 rounded-xl border border-slate-200 mb-6 flex flex-col gap-2">
               <span className="text-xs font-semibold text-slate-500 ml-1 uppercase text-left">Preview</span>
