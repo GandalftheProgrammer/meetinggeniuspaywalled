@@ -14,7 +14,7 @@ export interface SessionMetadata {
 }
 
 const DB_NAME = 'MeetingGeniusDB';
-const DB_VERSION = 2; // Incremented version for new schema
+const DB_VERSION = 2;
 const CHUNK_STORE = 'audio_chunks';
 const SESSION_STORE = 'active_sessions';
 
@@ -40,6 +40,9 @@ export const initDB = (): Promise<IDBDatabase> => {
 
 export const saveChunkToDB = async (chunk: AudioChunk, duration: number) => {
   const db = await initDB();
+  // FORCEER een geldig getal voor de duur. NaN wordt 0.
+  const cleanDuration = isNaN(duration) || duration < 0 ? 0 : Math.floor(duration);
+  
   return new Promise<void>((resolve, reject) => {
     const transaction = db.transaction([CHUNK_STORE, SESSION_STORE], 'readwrite');
     const chunkStore = transaction.objectStore(CHUNK_STORE);
@@ -49,7 +52,7 @@ export const saveChunkToDB = async (chunk: AudioChunk, duration: number) => {
     sessionStore.put({ 
         sessionId: chunk.sessionId, 
         lastUpdated: Date.now(),
-        duration: duration,
+        duration: cleanDuration,
         title: localStorage.getItem(`title_${chunk.sessionId}`) || 'Untitled Meeting'
     });
 
@@ -83,9 +86,8 @@ export const getPendingSessions = async (): Promise<SessionMetadata[]> => {
     const request = store.getAll();
 
     request.onsuccess = () => {
-      // Return sessions updated in the last 48 hours
       const fortyEightHoursAgo = Date.now() - (48 * 60 * 60 * 1000);
-      const results = (request.result as SessionMetadata[]).filter(s => s.lastUpdated > fortyEightHoursAgo);
+      const results = (request.result as SessionMetadata[]).filter(s => s.lastUpdated > fortyEightHoursAgo && s.duration > 2);
       resolve(results);
     };
     request.onerror = () => reject(request.error);
@@ -107,7 +109,6 @@ export const cleanupOldSessions = async (): Promise<void> => {
             sessions.forEach(s => {
                 if (s.lastUpdated < fortyEightHoursAgo) {
                     sessionStore.delete(s.sessionId);
-                    // Also delete associated chunks
                     const index = chunkStore.index('sessionId');
                     const chunkRequest = index.openCursor(IDBKeyRange.only(s.sessionId));
                     chunkRequest.onsuccess = (e) => {

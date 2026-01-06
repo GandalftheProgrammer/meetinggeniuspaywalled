@@ -50,31 +50,13 @@ const App: React.FC = () => {
     setDebugLogs(prev => [...prev, `${new Date().toLocaleTimeString('en-GB')} - ${msg}`]);
   };
 
-  // Functie om de werkelijke audio-duur te meten
-  const getAudioDuration = (blob: Blob): Promise<number> => {
-    return new Promise((resolve) => {
-      const audio = new Audio();
-      const url = URL.createObjectURL(blob);
-      audio.src = url;
-      audio.onloadedmetadata = () => {
-        resolve(audio.duration);
-        URL.revokeObjectURL(url);
-      };
-      audio.onerror = () => {
-        resolve(0);
-        URL.revokeObjectURL(url);
-      };
-      // Timeout fallback
-      setTimeout(() => resolve(0), 2000);
-    });
-  };
-
   // --- BACKGROUND RECOVERY CHECK ---
   const checkForRecoverableSessions = async () => {
     try {
-      await cleanupOldSessions(); // First remove anything > 48h
+      await cleanupOldSessions(); // Verwijder sessies ouder dan 48 uur
       const pending = await getPendingSessions();
       if (pending && pending.length > 0) {
+        // Pak de meest recente sessie
         const latest = pending.sort((a, b) => b.lastUpdated - a.lastUpdated)[0];
         setPendingSession(latest);
       }
@@ -86,15 +68,13 @@ const App: React.FC = () => {
   const handleRecover = async () => {
     if (!pendingSession) return;
     try {
-        setIsGoogleBusy(true); // Blokkeer UI tijdens berekenen
+        setIsGoogleBusy(true); // Blokkeer de UI even tijdens het ophalen
         addLog("Recovering audio chunks from local storage...");
         const chunks = await getChunksForSession(pendingSession.sessionId);
+        
         if (chunks && chunks.length > 0) {
           const type = chunks[0].type || 'audio/webm';
           const blob = new Blob(chunks, { type });
-          
-          // Bepaal de werkelijke tijd uit de blob
-          const actualDuration = await getAudioDuration(blob);
           
           sessionIdRef.current = pendingSession.sessionId;
           audioChunksRef.current = chunks;
@@ -105,7 +85,11 @@ const App: React.FC = () => {
           setAudioUrl(newUrl);
           
           setTitle(pendingSession.title || "");
-          setCurrentRecordingSeconds(actualDuration > 0 ? actualDuration : pendingSession.duration);
+          
+          // CRUCIAAL: We gebruiken de duration uit de DB metadata.
+          // Deze is accurater dan een blob-berekening na een crash.
+          setCurrentRecordingSeconds(pendingSession.duration);
+          
           setAppState(AppState.PAUSED);
           setPendingSession(null);
           addLog("Session successfully restored.");

@@ -60,7 +60,7 @@ const Recorder: React.FC<RecorderProps> = ({
   const silentAudioRef = useRef<HTMLAudioElement | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
-  // Synchroniseer de timer direct bij herstel
+  // Synchroniseer de interne klok bij herstel
   useEffect(() => {
     if (recoveredSeconds > 0 && !isRecording) {
       setRecordingTime(recoveredSeconds);
