@@ -245,11 +245,15 @@ const App: React.FC = () => {
 
     try {
       // Construction of strict date and time strings for naming
+      // Requirement: Recorded on [date] at [time] (e.g. Recorded on 7 January 2026 at 18:02)
+      // Filename: [Meeting title] on [date] at [time] - [type].m4a (e.g. Project meeting on 7 January 2026 at 18h02m05s - audio.m4a)
       const startTime = sessionStartTime || new Date();
       const datePart = startTime.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
       const hours = startTime.getHours().toString().padStart(2, '0');
       const mins = startTime.getMinutes().toString().padStart(2, '0');
-      const timePartFilename = `${hours}h${mins}`;
+      const secs = startTime.getSeconds().toString().padStart(2, '0');
+      
+      const timePartFilename = `${hours}h${mins}m${secs}s`;
       const timePartInternal = `${hours}:${mins}`;
       const dateTimeStrFilename = `${datePart} at ${timePartFilename}`;
       const dateTimeStrInternal = `${datePart} at ${timePartInternal}`;
@@ -283,13 +287,13 @@ const App: React.FC = () => {
         addLog("Syncing results to Google Drive...");
         try {
             if (newData.summary || newData.conclusions.length > 0) {
-              // Internal Content: Title format "Notes [Meeting title]" followed by "Recorded on [date] at [time]"
+              // Internal Content Header: "[type] [Meeting title] \n Recorded on [date] at [time]"
               const notesMd = `[NOTES] ${cleanTitle}\nRecorded on ${dateTimeStrInternal}\n\n${newData.summary}\n\n## Conclusions\n${newData.conclusions.map(i => `- ${i}`).join('\n')}\n\n## Action Items\n${newData.actionItems.map(i => `- ${i}`).join('\n')}`;
               // File Name: [Meeting title] on [date] at [time] - notes.gdoc
               await uploadTextToDrive(`${cleanTitle} on ${dateTimeStrFilename} - notes`, notesMd, 'Notes', user.uid);
             }
             if (newData.transcription?.trim()) {
-              // Internal Content: Title format "Transcript [Meeting title]" followed by "Recorded on [date] at [time]"
+              // Internal Content Header: "[type] [Meeting title] \n Recorded on [date] at [time]"
               const transcriptMd = `[TRANSCRIPT] ${cleanTitle}\nRecorded on ${dateTimeStrInternal}\n\n${newData.transcription}`;
               // File Name: [Meeting title] on [date] at [time] - transcript.gdoc
               await uploadTextToDrive(`${cleanTitle} on ${dateTimeStrFilename} - transcript`, transcriptMd, 'Transcripts', user.uid);

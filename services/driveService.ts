@@ -151,7 +151,7 @@ const ensureFolder = async (token: string, sub: string): Promise<string> => {
 const convertMarkdownToHtml = (md: string): string => {
     // Process strictly named internal document headers logic:
     // Header format: [NOTES] Meeting Title OR [TRANSCRIPT] Meeting Title
-    // Then Recorded on [date] at [time]
+    // Then Recorded on [date] at [time] (e.g. Recorded on 7 January 2026 at 18:02)
     // FIXED: Bullet regex now uses ^ anchor to prevent hyphens in the title from being converted to bullets.
     let html = md.trim()
         .replace(/^\[NOTES\] (.*$)/gm, '<h1 class="title">Notes $1</h1>')

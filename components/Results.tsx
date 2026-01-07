@@ -35,11 +35,14 @@ const Results: React.FC<ResultsProps> = ({
   const cleanTitle = title.replace(/[()]/g, '').trim();
   
   // Format dates strictly as requested: [Meeting title] on [date] at [time]
+  // Date must include year. Time must include seconds in filename.
   const startTime = sessionDate || new Date();
   const datePart = startTime.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
   const hours = startTime.getHours().toString().padStart(2, '0');
   const mins = startTime.getMinutes().toString().padStart(2, '0');
-  const timePartFilename = `${hours}h${mins}`;
+  const secs = startTime.getSeconds().toString().padStart(2, '0');
+
+  const timePartFilename = `${hours}h${mins}m${secs}s`;
   const timePartInternal = `${hours}:${mins}`;
   const dateTimeStrFilename = `${datePart} at ${timePartFilename}`;
   const dateTimeStrInternal = `${datePart} at ${timePartInternal}`;
