@@ -111,14 +111,30 @@ function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
+/**
+ * Defensive utility to ensure array elements are strings.
+ * If an element is an object, attempts to extract text-like properties or strings it.
+ */
+function sanitizeArray(arr: any): string[] {
+    if (!Array.isArray(arr)) return [];
+    return arr.map(item => {
+        if (typeof item === 'string') return item;
+        if (item === null || item === undefined) return '';
+        if (typeof item === 'object') {
+            return item.text || item.task || item.description || item.content || JSON.stringify(item);
+        }
+        return String(item);
+    }).filter(s => s !== '');
+}
+
 function parseResponse(jsonText: string, mode: ProcessingMode): MeetingData {
     try {
         const rawData = JSON.parse(jsonText);
         return {
             transcription: rawData.transcription || "",
             summary: rawData.summary || "",
-            conclusions: Array.isArray(rawData.conclusions) ? rawData.conclusions : [],
-            actionItems: Array.isArray(rawData.actionItems) ? rawData.actionItems : []
+            conclusions: sanitizeArray(rawData.conclusions),
+            actionItems: sanitizeArray(rawData.actionItems)
         };
     } catch (e) {
         console.error("Parse failed for final result:", jsonText);

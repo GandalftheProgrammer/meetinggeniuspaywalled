@@ -46,13 +46,13 @@ export default async (req: Request) => {
 
     const updateStatus = async (msg: string) => { 
         console.log(`[Background] ${msg}`); 
-        // We'll update the blob status to communicate back to the UI which step we are on
         const currentData = await resultStore.get(jobId, { type: "json" }) || { status: 'PROCESSING' };
         await resultStore.setJSON(jobId, { ...currentData, lastLog: msg });
     };
 
-    // --- 1. INITIALIZE GEMINI UPLOAD ---
-    await updateStatus("Step 1/5: Initializing Cloud Storage...");
+    // --- 1. UPLOAD & PROCESS ---
+    await updateStatus("Step 1/3: Preparing audio file for analysis...");
+    
     const handshakeUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodedKey}`;
     const initResp = await fetch(handshakeUrl, {
         method: 'POST',
@@ -73,8 +73,6 @@ export default async (req: Request) => {
         uploadUrl = `${uploadUrl}${uploadUrl.includes('?') ? '&' : '?'}key=${encodedKey}`;
     }
 
-    // --- 2. STITCH & UPLOAD ---
-    await updateStatus("Step 2/5: Uploading audio bytes...");
     const GEMINI_CHUNK_SIZE = 8 * 1024 * 1024;
     let buffer = Buffer.alloc(0);
     let uploadOffset = 0;
@@ -120,41 +118,36 @@ export default async (req: Request) => {
     const fileResult = await finalResp.json();
     const fileUri = fileResult.file?.uri || fileResult.uri;
 
-    // --- 3. WAIT FOR ACTIVE & GET DURATION ---
-    await updateStatus("Step 3/5: AI listening to file...");
     const fileMetadata = await waitForFileActive(fileUri, encodedKey);
-    
-    // Duration is in seconds. Extract from videoMetadata.duration (often "123.45s")
     const durationStr = fileMetadata.videoMetadata?.duration || "0s";
-    const totalDurationSeconds = parseFloat(durationStr.replace('s', '')) || (fileSize / 16000); // Rough fallback
+    const totalDurationSeconds = parseFloat(durationStr.replace('s', '')) || (fileSize / 16000);
     const estimatedDurationMinutes = Math.ceil(totalDurationSeconds / 60);
 
-    // --- 4. MULTI-PASS GENERATION ---
-    await updateStatus("Step 4/5: Generating high-density notes...");
+    // --- 2. NOTES GENERATION ---
+    await updateStatus("Step 2/3: Generating high-density notes & summary...");
     
     let summaryData: any = { summary: "", conclusions: [], actionItems: [] };
     if (mode !== 'TRANSCRIPT_ONLY') {
         const notesJson = await callGemini(fileUri, mimeType, "NOTES_ONLY", model, encodedKey);
         try {
-            const parsed = JSON.parse(notesJson.replace(/```json/g, '').replace(/```/g, '').trim());
-            summaryData = parsed;
+            const cleanJson = notesJson.replace(/```json/g, '').replace(/```/g, '').trim();
+            summaryData = JSON.parse(cleanJson);
         } catch (e) {
             console.error("Notes parse error:", e);
             summaryData.summary = "Summary generated, but parsing failed.";
         }
     }
 
+    // --- 3. TRANSCRIPTION ---
     let finalTranscription = "";
     if (mode !== 'NOTES_ONLY') {
-        // SEGMENTED TRANSCRIPTION FOR LONG FILES
-        // We chunk the transcription into 20-minute segments to stay under token limits
         const segmentSizeMinutes = 20;
         const totalSegments = Math.ceil(estimatedDurationMinutes / segmentSizeMinutes);
         
         for (let s = 0; s < totalSegments; s++) {
             const startMin = s * segmentSizeMinutes;
             const endMin = Math.min((s + 1) * segmentSizeMinutes, estimatedDurationMinutes);
-            await updateStatus(`Step 5/5: Transcribing segment ${s + 1}/${totalSegments} (${startMin}-${endMin}m)...`);
+            await updateStatus(`Step 3/3: Transcribing audio segment ${s + 1}/${totalSegments} (${startMin}-${endMin}m)...`);
             
             const segmentPrompt = `Transcribe the audio verbatim from minute ${startMin} to minute ${endMin}. Output raw text only. No summary.`;
             const segmentText = await callGemini(fileUri, mimeType, "SEGMENT", model, encodedKey, segmentPrompt);
@@ -163,7 +156,6 @@ export default async (req: Request) => {
         }
     }
 
-    // --- 5. FINALIZE ---
     const finalResult = {
         transcription: finalTranscription,
         summary: summaryData.summary || "",
@@ -173,7 +165,6 @@ export default async (req: Request) => {
 
     await resultStore.setJSON(jobId, { status: 'COMPLETED', result: JSON.stringify(finalResult) });
 
-    // Update usage
     if (uid) {
         const profile = await userStore.get(uid, { type: "json" }) as any;
         if (profile && !profile.isPro) {
@@ -181,8 +172,6 @@ export default async (req: Request) => {
             await userStore.setJSON(uid, profile);
         }
     }
-
-    console.log(`[Background] Job ${jobId} Completed Successfully.`);
 
   } catch (err: any) {
     console.error(`[Background] FATAL ERROR: ${err.message}`);
@@ -210,9 +199,8 @@ async function callGemini(fileUri: string, mimeType: string, mode: string, model
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodedKey}`;
 
     const systemInstruction = `You are an expert meeting secretary.
-    1. Detect the primary language and output everything in that language.
-    2. Focus on accuracy and verbatim results for transcription.
-    3. Use the following instructions based on the request.`;
+    MANDATORY: Detect the primary language of the audio. Output the summary, conclusions, and action items in that EXACT SAME language. Do NOT translate to English unless the source audio is English.
+    Focus on accuracy and verbatim results for transcription.`;
 
     let taskInstruction = "";
     let responseMimeType = "text/plain";
@@ -220,8 +208,9 @@ async function callGemini(fileUri: string, mimeType: string, mode: string, model
     if (mode === 'NOTES_ONLY') {
         responseMimeType = "application/json";
         taskInstruction = `Create detailed structured notes (summary, conclusions, actionItems). 
-        Return raw JSON with keys: "summary", "conclusions" (array), "actionItems" (array). 
-        Ignore transcription for this call.`;
+        Return raw JSON with keys: "summary", "conclusions" (array of strings), "actionItems" (array of strings). 
+        IMPORTANT: Conclusions and actionItems must be arrays of plain strings only. Do not use objects.
+        Output MUST be in the same language as the spoken audio.`;
     } else {
         taskInstruction = customPrompt || "Transcribe the audio verbatim.";
     }
