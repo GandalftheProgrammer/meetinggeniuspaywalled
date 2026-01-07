@@ -42,3 +42,19 @@ export interface GoogleUser {
   access_token: string;
   expires_in: number;
 }
+
+// --- NEW LOGGING TYPES ---
+export type PipelineStatus = 'pending' | 'processing' | 'completed' | 'error';
+
+export interface PipelineStep {
+  id: number;
+  label: string;
+  detail?: string; // e.g., "45 MB", "12s latency"
+  status: PipelineStatus;
+}
+
+export interface PipelineUpdate {
+  stepId: number;
+  status: PipelineStatus;
+  detail?: string;
+}

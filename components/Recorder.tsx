@@ -1,8 +1,8 @@
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { Square, Loader2, Trash2, Circle, ListChecks, FileText, Upload, AlertTriangle, Crown, RotateCcw } from 'lucide-react';
+import { Square, Loader2, Trash2, Circle, ListChecks, FileText, Upload, AlertTriangle, Crown, RotateCcw, CheckCircle2, Clock } from 'lucide-react';
 import AudioVisualizer from './AudioVisualizer';
-import { AppState, ProcessingMode, UserProfile, FREE_LIMIT_SECONDS } from '../types';
+import { AppState, ProcessingMode, UserProfile, FREE_LIMIT_SECONDS, PipelineStep } from '../types';
 
 const SILENT_AUDIO_URI = 'data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4LjI5LjEwMAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAAEAAABIADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMD//////////////////////////////////wAAADFMYXZjNTguNTQuAAAAAAAAAAAAAAAAJAAAAAAAAAAAASAAxIirAAAA//OEAAAAAAAAAAAAAAAAAAAAAAA';
 
@@ -14,7 +14,7 @@ interface RecorderProps {
   onRecordingChange: (isRecording: boolean) => void;
   onFileUpload: (file: File) => void;
   audioUrl: string | null;
-  debugLogs: string[];
+  pipelineSteps: PipelineStep[]; // CHANGED: Now receives structured steps instead of strings
   user: UserProfile | null;
   onUpgrade: () => void;
   onLogin: () => void;
@@ -35,7 +35,7 @@ const Recorder: React.FC<RecorderProps> = ({
   onRecordingChange,
   onFileUpload,
   audioUrl, 
-  debugLogs,
+  pipelineSteps,
   user,
   onUpgrade,
   onLogin,
@@ -58,7 +58,7 @@ const Recorder: React.FC<RecorderProps> = ({
   const audioContextRef = useRef<AudioContext | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const silentAudioRef = useRef<HTMLAudioElement | null>(null);
-  const logsEndRef = useRef<HTMLDivElement>(null);
+  const stepsEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (recoveredSeconds >= 0 && !isRecording) {
@@ -102,10 +102,14 @@ const Recorder: React.FC<RecorderProps> = ({
   }, [recordingTime, isRecording, user, onLogin]);
 
   useEffect(() => {
-    if (logsEndRef.current) {
-      logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    if (stepsEndRef.current && appState === AppState.PROCESSING) {
+        // Auto-scroll to the current active step
+        const activeStep = document.querySelector('.pipeline-step-active');
+        if (activeStep) {
+            activeStep.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
     }
-  }, [debugLogs]);
+  }, [pipelineSteps, appState]);
 
   const cleanupResources = () => {
     if (timerRef.current) clearInterval(timerRef.current);
@@ -118,7 +122,6 @@ const Recorder: React.FC<RecorderProps> = ({
   };
 
   const getSupportedMimeType = () => {
-    // Prefer m4a/mp4 for better compression and broader compatibility as requested
     const types = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/aac', 'audio/wav'];
     for (const type of types) {
       if (MediaRecorder.isTypeSupported(type)) return type;
@@ -211,22 +214,58 @@ const Recorder: React.FC<RecorderProps> = ({
   if (isProcessing) {
     return (
       <div className="w-full max-w-lg mx-auto bg-white rounded-2xl shadow-xl border border-slate-100 p-8 flex flex-col items-center">
-         <div className="flex flex-col items-center gap-4 mb-6">
-            <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center border border-blue-100">
+         <div className="flex flex-col items-center gap-4 mb-8">
+            <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center border border-blue-100 relative">
               <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
+              <div className="absolute inset-0 rounded-full border-4 border-blue-100 opacity-30 animate-ping"></div>
             </div>
             <div className="text-center">
-              <p className="text-slate-800 font-bold text-xl tracking-tight">AI Pipeline Active</p>
-              <p className="text-slate-500 text-sm font-medium">Processing your meeting...</p>
+              <p className="text-slate-800 font-bold text-xl tracking-tight">Processing Meeting</p>
+              <p className="text-slate-500 text-sm font-medium">Please wait while we secure and analyze your audio</p>
             </div>
          </div>
-         <div className="w-full bg-slate-900 text-slate-300 p-4 rounded-xl text-[11px] font-mono h-48 overflow-y-auto border border-slate-800 shadow-inner">
-            {debugLogs.map((log, i) => (
-              <div key={i} className="mb-1 border-b border-slate-800 pb-1 last:border-0 opacity-80">
-                <span className="text-blue-400 mr-2">[{i+1}]</span> {log}
-              </div>
-            ))}
-            <div ref={logsEndRef} />
+         
+         <div className="w-full bg-slate-50 p-6 rounded-xl border border-slate-100 max-h-[400px] overflow-y-auto custom-scrollbar relative">
+            <div className="space-y-4">
+                {pipelineSteps.map((step, idx) => {
+                    const isActive = step.status === 'processing';
+                    const isDone = step.status === 'completed';
+                    const isPending = step.status === 'pending';
+                    const isError = step.status === 'error';
+
+                    return (
+                        <div 
+                            key={step.id} 
+                            className={`flex items-start gap-3 transition-all duration-300 ${isActive ? 'pipeline-step-active scale-[1.02]' : 'opacity-80'}`}
+                        >
+                            <div className="mt-0.5 shrink-0">
+                                {isDone && <CheckCircle2 className="w-5 h-5 text-green-500" />}
+                                {isActive && <Loader2 className="w-5 h-5 text-blue-600 animate-spin" />}
+                                {isPending && <Circle className="w-5 h-5 text-slate-300" />}
+                                {isError && <AlertTriangle className="w-5 h-5 text-red-500" />}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                                <div className="flex items-center justify-between gap-2">
+                                    <p className={`text-sm font-semibold ${isActive ? 'text-blue-700' : isDone ? 'text-slate-700' : isError ? 'text-red-600' : 'text-slate-400'}`}>
+                                        {step.label}
+                                    </p>
+                                    {step.detail && (
+                                        <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded-full ${isActive ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-500'}`}>
+                                            {step.detail}
+                                        </span>
+                                    )}
+                                </div>
+                                {isActive && (
+                                    <div className="h-1 w-full bg-slate-100 rounded-full mt-2 overflow-hidden">
+                                        <div className="h-full bg-blue-500 animate-[shimmer_2s_infinite_linear] w-[40%] rounded-full relative overflow-hidden after:absolute after:inset-0 after:bg-gradient-to-r after:from-transparent after:via-white/30 after:to-transparent after:animate-[shimmer_1s_infinite]"></div>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    );
+                })}
+                <div ref={stepsEndRef} className="h-4" />
+            </div>
          </div>
       </div>
     );

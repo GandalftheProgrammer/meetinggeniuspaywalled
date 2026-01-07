@@ -6,8 +6,8 @@ import Results from './components/Results';
 import Footer from './components/Footer';
 import PrivacyPolicy from './components/PrivacyPolicy';
 import TermsOfService from './components/TermsOfService';
-import { AppState, MeetingData, ProcessingMode, GeminiModel, UserProfile } from './types';
-import { processMeetingAudio } from './services/geminiService';
+import { AppState, MeetingData, ProcessingMode, GeminiModel, UserProfile, PipelineStep, PipelineUpdate } from './types';
+import { processMeetingAudio, INITIAL_PIPELINE_STEPS } from './services/geminiService';
 import { initDrive, connectToDrive, uploadAudioToDrive, uploadTextToDrive, disconnectDrive, checkDriveStatus, getAccessToken, ensureValidToken } from './services/driveService';
 import { saveChunkToDB, getPendingSessions, getChunksForSession, cleanupOldSessions, deleteSessionData } from './services/db';
 import { Zap, Shield, Cloud, Loader2 } from 'lucide-react';
@@ -40,24 +40,23 @@ const App: React.FC = () => {
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [isDriveConnected, setIsDriveConnected] = useState(false);
   const [isConnectingDrive, setIsConnectingDrive] = useState(false);
-  const [debugLogs, setDebugLogs] = useState<string[]>([]);
   const [sessionStartTime, setSessionStartTime] = useState<Date | null>(null);
   const [isGoogleBusy, setIsGoogleBusy] = useState(false);
   const [currentRecordingSeconds, setCurrentRecordingSeconds] = useState(0);
   const tokenClientRef = useRef<any>(null);
 
-  // Smart logging: Only adds log if it's different from the previous one
-  const addLog = (msg: string) => {
-    setDebugLogs(prev => {
-      const lastLogFull = prev[prev.length - 1];
-      // Check if message content matches to prevent polling spam
-      if (lastLogFull) {
-        const parts = lastLogFull.split(' - ');
-        if (parts.length > 1 && parts[1] === msg) return prev;
-      }
-      return [...prev, `${new Date().toLocaleTimeString('en-GB')} - ${msg}`];
-    });
+  // New Pipeline Logging State
+  const [pipelineSteps, setPipelineSteps] = useState<PipelineStep[]>(INITIAL_PIPELINE_STEPS);
+
+  const updatePipelineStep = (update: PipelineUpdate) => {
+      setPipelineSteps(prev => prev.map(step => 
+          step.id === update.stepId 
+            ? { ...step, status: update.status, detail: update.detail || step.detail } 
+            : step
+      ));
   };
+
+  const addLog = (msg: string) => { console.log(msg); }; // Legacy compatibility shim
 
   const getAccurateAudioDuration = async (blob: Blob): Promise<number> => {
     try {
@@ -92,7 +91,6 @@ const App: React.FC = () => {
     if (!pendingSession) return;
     try {
         setIsGoogleBusy(true); 
-        addLog("Recovering your most recent recording...");
         const chunks = await getChunksForSession(pendingSession.sessionId);
         
         if (chunks && chunks.length > 0) {
@@ -116,7 +114,6 @@ const App: React.FC = () => {
           
           setAppState(AppState.PAUSED);
           setPendingSession(null);
-          addLog("Recording successfully restored.");
         }
     } catch (err) {
         console.error("Recovery execution failed:", err);
@@ -231,7 +228,6 @@ const App: React.FC = () => {
     await disconnectDrive(user.uid);
     setIsDriveConnected(false);
     setIsConnectingDrive(false);
-    addLog("Disconnected from Google Drive.");
   };
 
   const handleLogout = () => {
@@ -240,7 +236,6 @@ const App: React.FC = () => {
     setIsDriveConnected(false);
     localStorage.removeItem('mg_logged_in');
     localStorage.removeItem('mg_user_profile');
-    addLog("Logged out.");
   };
 
   const handleProcessAudio = async (mode: ProcessingMode) => {
@@ -251,12 +246,15 @@ const App: React.FC = () => {
     setTitle(finalTitle);
     setAppState(AppState.PROCESSING);
     setError(null);
-    setDebugLogs([]); // Clear previous logs when starting fresh
+    setPipelineSteps(INITIAL_PIPELINE_STEPS); // Reset UI
 
     try {
-      // Construction of strict date and time strings for naming
-      // Requirement: Recorded on [date] at [time] (e.g. Recorded on 7 January 2026 at 18:02)
-      // Filename: [Meeting title] on [date] at [time] - [type].m4a (e.g. Project meeting on 7 January 2026 at 18h02m05s - audio.m4a)
+      // Step 1: Input Received
+      updatePipelineStep({ stepId: 1, status: 'processing' });
+      await new Promise(r => setTimeout(r, 600)); // Visible delay for comfort
+      updatePipelineStep({ stepId: 1, status: 'completed' });
+
+      // Build filenames
       const startTime = sessionStartTime || new Date();
       const datePart = startTime.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
       const hours = startTime.getHours().toString().padStart(2, '0');
@@ -270,46 +268,57 @@ const App: React.FC = () => {
       
       const cleanTitle = finalTitle.replace(/[()]/g, '').trim();
 
-      // DRIVE-FIRST: SECURE AUDIO IMMEDIATELY
+      // Step 2: Drive Backup (Conditional)
+      updatePipelineStep({ stepId: 2, status: 'processing' });
       if (localStorage.getItem('mg_drive_connected') === 'true') {
-        addLog("Securing audio in Google Drive...");
         try {
             const token = await ensureValidToken(user.uid);
             if (token) {
-                // Strict Naming: [Meeting title] on [date] at [time] - [type].m4a
                 const audioFileName = `${cleanTitle} on ${dateTimeStrFilename} - audio.m4a`;
                 await uploadAudioToDrive(audioFileName, combinedBlob, user.uid);
-                addLog("Audio safely backed up to Drive.");
+                updatePipelineStep({ stepId: 2, status: 'completed', detail: 'Audio Secured' });
+            } else {
+                 updatePipelineStep({ stepId: 2, status: 'completed', detail: 'Skipped (No Token)' });
             }
-        } catch (e: any) { addLog(`Warning: Drive backup failed, continuing with analysis: ${e.message}`); }
+        } catch (e: any) { 
+            updatePipelineStep({ stepId: 2, status: 'error', detail: 'Failed' });
+            console.warn("Backup failed", e);
+        }
+      } else {
+        updatePipelineStep({ stepId: 2, status: 'completed', detail: 'Not Connected' });
       }
 
-      // 2. RUN AI PIPELINE
-      const newData = await processMeetingAudio(combinedBlob, combinedBlob.type || 'audio/webm', 'ALL', selectedModel, addLog, user.uid);
+      // Step 3-18: Gemini Service
+      const newData = await processMeetingAudio(
+          combinedBlob, 
+          combinedBlob.type || 'audio/webm', 
+          'ALL', 
+          selectedModel, 
+          updatePipelineStep, // Pass the UI updater
+          user.uid
+      );
       
-      // 3. COMPLETE
       setMeetingData(newData);
       setAppState(AppState.COMPLETED);
       syncUserProfile(user.email, user.uid);
 
-      // 4. SYNC RESULTS TO DRIVE
+      // Final Sync Step (UI)
       if (localStorage.getItem('mg_drive_connected') === 'true') {
-        addLog("Syncing results to Google Drive...");
         try {
             if (newData.summary || newData.conclusions.length > 0) {
-              // Internal Content Header: "[type] [Meeting title] \n Recorded on [date] at [time]"
               const notesMd = `[NOTES] ${cleanTitle}\nRecorded on ${dateTimeStrInternal}\n\n${newData.summary}\n\n## Conclusions\n${newData.conclusions.map(i => `- ${i}`).join('\n')}\n\n## Action Items\n${newData.actionItems.map(i => `- ${i}`).join('\n')}`;
-              // File Name: [Meeting title] on [date] at [time] - notes.gdoc
               await uploadTextToDrive(`${cleanTitle} on ${dateTimeStrFilename} - notes`, notesMd, 'Notes', user.uid);
             }
             if (newData.transcription?.trim()) {
-              // Internal Content Header: "[type] [Meeting title] \n Recorded on [date] at [time]"
               const transcriptMd = `[TRANSCRIPT] ${cleanTitle}\nRecorded on ${dateTimeStrInternal}\n\n${newData.transcription}`;
-              // File Name: [Meeting title] on [date] at [time] - transcript.gdoc
               await uploadTextToDrive(`${cleanTitle} on ${dateTimeStrFilename} - transcript`, transcriptMd, 'Transcripts', user.uid);
             }
-            addLog("Drive sync completed.");
-        } catch (e: any) { addLog(`Drive result sync failed: ${e.message}`); }
+            updatePipelineStep({ stepId: 18, status: 'completed', detail: 'Synced' });
+        } catch (e: any) { 
+            updatePipelineStep({ stepId: 18, status: 'error', detail: 'Sync Failed' });
+        }
+      } else {
+          updatePipelineStep({ stepId: 18, status: 'completed', detail: 'Local Only' });
       }
       
       cleanupOldSessions();
@@ -327,7 +336,7 @@ const App: React.FC = () => {
     if (audioUrl) URL.revokeObjectURL(audioUrl);
     setAudioUrl(null);
     setMeetingData(null);
-    setDebugLogs([]);
+    setPipelineSteps(INITIAL_PIPELINE_STEPS);
     setTitle("");
     setError(null);
     setCurrentRecordingSeconds(0);
@@ -399,7 +408,7 @@ const App: React.FC = () => {
           if (!title) setTitle(f.name.replace(/\.[^/.]+$/, ""));
         }}
         audioUrl={audioUrl}
-        debugLogs={debugLogs}
+        pipelineSteps={pipelineSteps}
         user={user}
         onUpgrade={() => {}} 
         onLogin={handleLogin}

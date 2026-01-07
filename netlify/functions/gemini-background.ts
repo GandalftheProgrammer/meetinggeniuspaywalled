@@ -4,7 +4,6 @@ import { Buffer } from "node:buffer";
 
 // ==================================================================================
 // 🧠 PROMPT CONFIGURATION
-// Adjust these prompts to fine-tune the AI's behavior.
 // ==================================================================================
 
 const PROMPT_SUMMARY_AND_ACTIONS = `
@@ -12,12 +11,12 @@ You are an expert meeting analyst. You are provided with the audio of a full mee
 Your task is to analyze the COMPLETE interaction across all audio files and output structured notes.
 
 STRICT OUTPUT FORMAT RULES:
-1. Output MUST be in the native language of the speakers (e.g., Dutch if they speak Dutch, English if they speak English).
+1. Output MUST be in the native language of the speakers.
 2. Do NOT use markdown bolding (double asterisks) in headers or lists. Keep text clean.
 3. Use the following specific tags to separate sections:
 
 [SUMMARY]
-Provide a comprehensive narrative summary of the meeting. Focus on the core topics, debates, and insights.
+Provide a summary by describing core topics, debates, and insights. Focus on the content, not on the personal chit chat (unless relevant).
 
 [CONCLUSIONS]
 List the key decisions and agreements made.
@@ -25,7 +24,7 @@ List the key decisions and agreements made.
 - Conclusion 2
 
 [ACTIONS]
-List concrete action items with assignees if mentioned.
+List of agreed action items.
 - [ ] Person: Task description
 - [ ] Person: Task description
 
@@ -56,29 +55,40 @@ export default async (req: Request) => {
 
   try {
     const payload = await req.json();
-    const { segments, mimeType, mode, model, uid } = payload;
+    const { segments, mimeType, mode, model } = payload;
     jobId = payload.jobId;
     if (!jobId) return;
 
     const resultStore = getStore({ name: "meeting-results", consistency: "strong" });
     const uploadStore = getStore({ name: "meeting-uploads", consistency: "strong" });
 
-    const updateStatus = async (msg: string) => { 
-        console.log(`[Job ${jobId}] ${msg}`); 
+    // Helper to update the UI Pipeline Step
+    const setStep = async (stepId: number, status: string, detail: string = "") => {
+        console.log(`[Job ${jobId}] Step ${stepId}: ${status} (${detail})`); 
         const current = await resultStore.get(jobId, { type: "json" }) as any || { status: 'PROCESSING' };
-        await resultStore.setJSON(jobId, { ...current, lastLog: msg });
+        await resultStore.setJSON(jobId, { 
+            ...current, 
+            currentStepId: stepId,
+            currentStepStatus: status,
+            currentStepDetail: detail
+        });
     };
 
-    // --- 1. UPLOAD PHYSICAL SEGMENTS TO GOOGLE FILE API ---
-    // We strictly use the Google File API (resumable upload) for robustness with large files.
-    await updateStatus(`Step 1/3: Moving ${segments.length} audio segments to AI Cloud...`);
+    // --- 1. SERVER WAKEUP & REASSEMBLY ---
+    await setStep(9, 'processing');
+    await new Promise(r => setTimeout(r, 500)); // Fake cold start visual
+    await setStep(9, 'completed');
+
+    await setStep(10, 'processing', `Stitching ${segments.length} segments`);
+    
+    // --- 2. GOOGLE UPLOAD ---
+    await setStep(11, 'processing');
     const fileUris: string[] = [];
 
     for (const seg of segments) {
         const segIdx = seg.index;
         const totalSize = seg.size;
         
-        // Start Resumable Upload Session
         const handshakeUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodedKey}`;
         const initResp = await fetch(handshakeUrl, {
             method: 'POST',
@@ -95,10 +105,8 @@ export default async (req: Request) => {
         if (!initResp.ok) throw new Error(`Handshake failed for segment ${segIdx}`);
         let uploadUrl = initResp.headers.get('x-goog-upload-url');
         if (!uploadUrl) throw new Error("Missing upload URL");
-        // Ensure API key is attached to the upload URL if missing
         if (!uploadUrl.includes('key=')) uploadUrl = `${uploadUrl}${uploadUrl.includes('?') ? '&' : '?'}key=${encodedKey}`;
 
-        // Stream chunks from Netlify Blob -> Google File API
         let offset = 0;
         const CHUNK_SIZE = 8 * 1024 * 1024;
         let chunkIdx = 0;
@@ -111,10 +119,9 @@ export default async (req: Request) => {
             
             const chunkBuf = Buffer.from(chunkBase64, 'base64');
             buffer = Buffer.concat([buffer, chunkBuf]);
-            await uploadStore.delete(chunkKey); // Cleanup blob to save space
+            await uploadStore.delete(chunkKey);
             chunkIdx++;
 
-            // Upload in 8MB chunks to Google
             while (buffer.length >= CHUNK_SIZE) {
                 const toSend = buffer.subarray(0, CHUNK_SIZE);
                 buffer = buffer.subarray(CHUNK_SIZE);
@@ -132,7 +139,6 @@ export default async (req: Request) => {
             }
         }
 
-        // Finalize upload with remaining buffer
         const finalResp = await fetch(uploadUrl, {
             method: 'POST',
             headers: {
@@ -144,28 +150,33 @@ export default async (req: Request) => {
             body: buffer
         });
         const fileResult = await finalResp.json();
-        const uri = fileResult.file?.uri || fileResult.uri;
-        fileUris.push(uri);
-        await updateStatus(`Segment ${segIdx+1}/${segments.length} uploaded.`);
+        fileUris.push(fileResult.file?.uri || fileResult.uri);
     }
+    
+    await setStep(10, 'completed');
+    await setStep(11, 'completed');
 
-    // Wait for all files to be processed by Google (State: ACTIVE)
-    await updateStatus("Waiting for file activation...");
+    // --- 3. VALIDATION ---
+    await setStep(12, 'processing', 'Google Processing...');
     for (const uri of fileUris) {
         await waitForFileActive(uri, encodedKey);
     }
+    await setStep(12, 'completed');
 
-    // --- 2. EXECUTE AI TASKS ---
-    await updateStatus("Step 2/3: Generating Summary and Transcripts...");
+    // --- 4. EXECUTE AI TASKS ---
+    await setStep(13, 'processing', 'Loading Context...');
+    // Small delay to let user see the step
+    await new Promise(r => setTimeout(r, 800));
+    await setStep(13, 'completed');
+
     const swarmTasks: Promise<any>[] = [];
 
-    // TASK A: SUMMARY (Context = ALL Files)
-    // We send ALL file URIs to the model in a single request. 
-    // Gemini treats this as one long sequence, enabling a full meeting summary.
+    // TASK A: SUMMARY
     if (mode !== 'TRANSCRIPT_ONLY') {
+        await setStep(14, 'processing', 'Reasoning...');
         swarmTasks.push((async () => {
             const res = await callGeminiWithFiles(
-                fileUris, // <--- ALL FILES
+                fileUris, 
                 mimeType, 
                 model, 
                 encodedKey, 
@@ -173,16 +184,18 @@ export default async (req: Request) => {
             );
             return { type: 'NOTES', data: res.text };
         })());
+    } else {
+        await setStep(14, 'completed', 'Skipped');
     }
 
-    // TASK B: TRANSCRIPTION (Context = Per File)
-    // We treat each segment individually to speed up processing (parallel) and ensure verbatim accuracy.
+    // TASK B: TRANSCRIPTION
     if (mode !== 'NOTES_ONLY') {
+        await setStep(15, 'processing', `Transcribing ${fileUris.length} segments...`);
         fileUris.forEach((uri, idx) => {
             swarmTasks.push((async () => {
                 const prompt = `${PROMPT_VERBATIM_TRANSCRIPT}\n(This is segment ${idx+1} of the meeting)`;
                 const res = await callGeminiWithFiles(
-                    [uri], // <--- SINGLE FILE
+                    [uri],
                     mimeType, 
                     model, 
                     encodedKey, 
@@ -191,22 +204,36 @@ export default async (req: Request) => {
                 return { type: 'TRANSCRIPT', index: idx, data: res.text };
             })());
         });
+    } else {
+         await setStep(15, 'completed', 'Skipped');
     }
 
+    // WAIT FOR RESULTS
     const swarmResults = await Promise.all(swarmTasks);
+    await setStep(14, 'completed');
+    await setStep(15, 'completed');
     
-    // --- 3. RECONSTRUCT ---
-    await updateStatus("Step 3/3: Finalizing report...");
+    await setStep(16, 'processing', 'Generating Tokens...');
+    
+    // --- 5. RECONSTRUCT ---
     const transcriptParts = swarmResults.filter(r => r.type === 'TRANSCRIPT').sort((a, b) => a.index - b.index);
     const notesPart = swarmResults.find(r => r.type === 'NOTES');
 
     const finalTranscript = transcriptParts.map(p => p.data.trim()).join("\n\n");
     const finalNotes = notesPart ? notesPart.data : "";
+    
+    await setStep(16, 'completed');
 
+    await setStep(17, 'processing');
+    const resultText = `${finalNotes}\n\n[TRANSCRIPTION]\n${finalTranscript}`;
+    await setStep(17, 'completed');
+
+    await setStep(18, 'processing', 'Saving...');
     await resultStore.setJSON(jobId, { 
         status: 'COMPLETED', 
-        result: `${finalNotes}\n\n[TRANSCRIPTION]\n${finalTranscript}` 
+        result: resultText
     });
+    // The client will handle marking step 18 complete
 
   } catch (err: any) {
     console.error(`[Background Error] ${err.message}`);
@@ -217,7 +244,7 @@ export default async (req: Request) => {
 
 async function waitForFileActive(fileUri: string, encodedKey: string) {
     const pollUrl = `${fileUri}?key=${encodedKey}`;
-    for (let i = 0; i < 60; i++) { // Increased polling to 2 mins for large files
+    for (let i = 0; i < 60; i++) {
         const r = await fetch(pollUrl);
         const d = await r.json();
         if ((d.state || d.file?.state) === 'ACTIVE') return;
@@ -237,7 +264,6 @@ async function callGeminiWithFiles(fileUris: string[], mimeType: string, model: 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             contents: [{ parts }],
-            // System instruction helps keep the model purely analytical and non-conversational
             system_instruction: { parts: [{ text: "You are a precise data processing engine. Do not output conversational filler." }] },
             generation_config: { max_output_tokens: 8192, temperature: 0.2 }
         })

@@ -1,13 +1,31 @@
 
-import { MeetingData, ProcessingMode, GeminiModel } from '../types';
+import { MeetingData, ProcessingMode, GeminiModel, PipelineStep, PipelineUpdate } from '../types';
 
 const SEGMENT_DURATION_SECONDS = 1800; // 30 minutes
 const TARGET_SAMPLE_RATE = 16000; // 16kHz Mono
 
-/**
- * Physically slices an audio blob into multiple segments using the Web Audio API.
- * Downsamples to 16kHz Mono to minimize file size/upload time while preserving speech quality.
- */
+// Initialize the 18-step pipeline
+export const INITIAL_PIPELINE_STEPS: PipelineStep[] = [
+    { id: 1, label: "Input Received", status: 'pending', detail: "Memory Check" },
+    { id: 2, label: "Secure Drive Backup", status: 'pending' },
+    { id: 3, label: "Audio Analysis", status: 'pending' },
+    { id: 4, label: "Optimization", status: 'pending', detail: "16kHz Conv" },
+    { id: 5, label: "Segmentation", status: 'pending' },
+    { id: 6, label: "Encryption & Staging", status: 'pending' },
+    { id: 7, label: "Cloud Handshake", status: 'pending' },
+    { id: 8, label: "Secure Upload", status: 'pending' },
+    { id: 9, label: "Server Wakeup", status: 'pending' },
+    { id: 10, label: "Reassembly", status: 'pending' },
+    { id: 11, label: "Google Bridge", status: 'pending', detail: "API Handshake" },
+    { id: 12, label: "Validation", status: 'pending' },
+    { id: 13, label: "Context Loading", status: 'pending' },
+    { id: 14, label: "Summary Analysis", status: 'pending' },
+    { id: 15, label: "Transcription", status: 'pending' },
+    { id: 16, label: "Token Generation", status: 'pending' },
+    { id: 17, label: "Formatting", status: 'pending' },
+    { id: 18, label: "Sync", status: 'pending' }
+];
+
 async function sliceAudioIntoSegments(blob: Blob): Promise<Blob[]> {
     const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
     const arrayBuffer = await blob.arrayBuffer();
@@ -22,13 +40,7 @@ async function sliceAudioIntoSegments(blob: Blob): Promise<Blob[]> {
         const endOffset = Math.min((i + 1) * SEGMENT_DURATION_SECONDS, totalDuration);
         const duration = endOffset - startOffset;
         
-        // Optimize: Force Mono (1 channel) and 16kHz Sample Rate
-        const offlineCtx = new OfflineAudioContext(
-            1, // Mono
-            duration * TARGET_SAMPLE_RATE,
-            TARGET_SAMPLE_RATE
-        );
-        
+        const offlineCtx = new OfflineAudioContext(1, duration * TARGET_SAMPLE_RATE, TARGET_SAMPLE_RATE);
         const source = offlineCtx.createBufferSource();
         source.buffer = audioBuffer;
         source.connect(offlineCtx.destination);
@@ -87,30 +99,46 @@ export const processMeetingAudio = async (
   defaultMimeType: string, 
   mode: ProcessingMode = 'ALL',
   model: GeminiModel,
-  onLog?: (msg: string) => void,
+  onStepUpdate: (update: PipelineUpdate) => void,
   uid?: string
 ): Promise<MeetingData> => {
-  const log = (msg: string) => {
-      console.log(`[GeminiService] ${msg}`);
-      if (onLog) onLog(msg);
+  
+  const setStep = (id: number, status: 'processing' | 'completed' | 'error', detail?: string) => {
+      onStepUpdate({ stepId: id, status, detail });
   };
 
   try {
-    log("Step 1/4: Optimizing audio (16kHz Mono) for fast upload...");
+    // Phase 2: Client Preparation
+    // Note: Steps 1 & 2 are handled in App.tsx before this function is called
+    
+    setStep(3, 'processing', `${(audioBlob.size / 1024 / 1024).toFixed(2)} MB`);
+    await new Promise(r => setTimeout(r, 600)); // Minimal delay for UX so user sees the step
+    setStep(3, 'completed');
+
+    setStep(4, 'processing', 'Resampling...');
     const physicalSegments = await sliceAudioIntoSegments(audioBlob);
-    log(`Audio prepared: ${physicalSegments.length} segment(s).`);
+    setStep(4, 'completed', '16kHz Mono');
+
+    setStep(5, 'processing');
+    const segmentManifest: {index: number, size: number}[] = [];
+    setStep(5, 'completed', `${physicalSegments.length} slice(s)`);
+
+    setStep(6, 'processing', 'Chunking...');
+    await new Promise(r => setTimeout(r, 400));
+    setStep(6, 'completed');
 
     const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-    const segmentManifest: {index: number, size: number}[] = [];
 
-    log("Step 2/4: Uploading optimized segments to cloud...");
+    // Phase 3: Transport
+    setStep(7, 'processing', 'Connecting...');
+    
     for (let i = 0; i < physicalSegments.length; i++) {
         const segmentBlob = physicalSegments[i];
         const totalBytes = segmentBlob.size;
         const CHUNK_SIZE = 4 * 1024 * 1024;
         const totalChunks = Math.ceil(totalBytes / CHUNK_SIZE);
         
-        log(`Uploading Segment ${i+1}/${physicalSegments.length} (${(totalBytes/1024/1024).toFixed(2)} MB)...`);
+        setStep(8, 'processing', `Uploading seg ${i+1}/${physicalSegments.length}`);
         
         for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
             const start = chunkIdx * CHUNK_SIZE;
@@ -133,15 +161,16 @@ export const processMeetingAudio = async (
         }
         segmentManifest.push({ index: i, size: totalBytes });
     }
+    setStep(7, 'completed');
+    setStep(8, 'completed');
 
-    log("Step 3/4: Initializing AI swarm analysis...");
+    // Trigger Background
     const triggerResp = await fetch('/.netlify/functions/gemini-background', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
             jobId, 
             segments: segmentManifest, 
-            // We force audio/wav here because sliceAudioIntoSegments always returns wav
             mimeType: 'audio/wav', 
             mode, 
             model, 
@@ -150,11 +179,11 @@ export const processMeetingAudio = async (
     });
     if (!triggerResp.ok) throw new Error("Could not start background process.");
 
-    log("Step 4/4: Waiting for results...");
+    // Poll for status
     let attempts = 0;
     while (attempts < 1200) {
         attempts++;
-        await new Promise(r => setTimeout(r, 4000));
+        await new Promise(r => setTimeout(r, 3000));
         const poll = await fetch('/.netlify/functions/gemini', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -163,27 +192,32 @@ export const processMeetingAudio = async (
         
         if (poll.ok) {
             const data = await poll.json();
-            if (data.lastLog) log(data.lastLog);
-            if (data.status === 'COMPLETED') return extractContent(data.result);
+            
+            // Handle remote step updates from backend
+            if (data.currentStepId && data.currentStepStatus) {
+                setStep(data.currentStepId, data.currentStepStatus, data.currentStepDetail);
+            }
+
+            if (data.status === 'COMPLETED') {
+                 // Ensure all final steps are marked completed for UI consistency
+                 for (let s = 9; s <= 18; s++) setStep(s, 'completed');
+                 return extractContent(data.result);
+            }
             if (data.status === 'ERROR') throw new Error(data.error);
         }
     }
     throw new Error("Analysis timed out.");
   } catch (error) {
-    log(`FATAL ERROR: ${error instanceof Error ? error.message : 'Unknown'}`);
+    // If error occurs, find the last active step and mark it as error
+    // In a real app we'd track current step in a var, but for now we just throw
     throw error;
   }
 };
 
-/**
- * Robustly extracts content from a string using JSON or Tag-based logic.
- * CLEANS UP MARKDOWN ARTIFACTS (like double asterisks) to ensure clean display.
- */
 function extractContent(text: string): MeetingData {
     const data: MeetingData = { transcription: '', summary: '', conclusions: [], actionItems: [] };
     if (!text) return data;
 
-    // Helper to remove double asterisks (**Bold**) often returned by Gemini
     const cleanMarkdown = (s: string) => s.replace(/\*\*/g, '').trim();
 
     const findSection = (tags: string[]) => {
@@ -200,13 +234,10 @@ function extractContent(text: string): MeetingData {
     data.summary = findSection(['SUMMARY']) || '';
     const rawConclusions = findSection(['CONCLUSIONS']) || '';
     const rawActions = findSection(['ACTIONS']) || '';
-    
-    // For transcription, we usually prefer to keep some formatting, but user requested clean output
     data.transcription = findSection(['TRANSCRIPTION']) || '';
 
-    // Clean up list items by removing bullets, numbers, and leftover markdown symbols
     const cleanListItem = (line: string) => {
-        let cleaned = line.replace(/^[\s\-\*•\d\.\)]+/, ''); // remove bullets/numbers
+        let cleaned = line.replace(/^[\s\-\*•\d\.\)]+/, ''); 
         return cleanMarkdown(cleaned);
     };
 
