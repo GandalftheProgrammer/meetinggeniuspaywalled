@@ -286,6 +286,10 @@ export const processMeetingAudio = async (
 
             if (data.status === 'COMPLETED') {
                  log(18, "Process Completed", { resultLength: data.result.length });
+                 
+                 // EXPLICITLY LOG RAW DATA FOR USER VERIFICATION
+                 console.log("%c🔍 RAW UNTOUCHED GEMINI OUTPUT:", "background: #000; color: #bada55; padding: 4px; font-weight: bold;", data.result);
+
                  // Force complete all steps to ensure 100% green UI at the end
                  for (let s = 9; s <= 18; s++) setStep(s, 'completed');
                  return extractContent(data.result);
@@ -303,27 +307,23 @@ export const processMeetingAudio = async (
   }
 };
 
-// --- ROBUST FUZZY PARSER (Multi-lingual) ---
+// --- ROBUST FUZZY PARSER ---
 function extractContent(text: string): MeetingData {
     const data: MeetingData = { transcription: '', summary: '', conclusions: [], actionItems: [] };
     if (!text) return data;
-
-    // Log the raw text for debugging if needed
-    console.log("Raw Server Output:", text);
 
     const cleanMarkdown = (s: string) => s.replace(/\*\*/g, '').trim();
 
     // The fuzzy extraction logic
     const extractSection = (headerKeywords: string[]): string => {
-        // Construct a flexible Regex
         const normalizedText = text;
-        
-        // Find best match for header
         let bestIndex = -1;
 
         for (const kw of headerKeywords) {
-            // Regex to find "Header" surrounded by likely Markdown chars, at start of a line
-            const regex = new RegExp(`(?:^|\\n)[\\s\\#\\*\\[]*${kw}[\\s\\]\\*\\:]*(?:\\n|$)`, 'i');
+            // RELAXED REGEX: Matches header at start of line OR start of string.
+            // Tolerates [Header], ## Header, or just Header:
+            // Does NOT require a newline immediately after, allowing "[Header] Content..."
+            const regex = new RegExp(`(?:^|\\n|\\r)[\\s\\#\\*\\[]*${kw}[\\s\\]\\*\\:]*`, 'i');
             const match = normalizedText.match(regex);
             if (match && match.index !== undefined) {
                 bestIndex = match.index + match[0].length;
@@ -331,27 +331,31 @@ function extractContent(text: string): MeetingData {
             }
         }
 
-        if (bestIndex === -1) return "";
+        if (bestIndex === -1) {
+            return "";
+        }
 
-        // Now find the end of this section by looking for the start of ANY other section
-        // We look for all known headers in BOTH English and Dutch
+        // Search for the Next Header to know where to stop
+        // We prioritize English headers since the prompt enforces them.
+        // We REMOVE generic Dutch words like 'Acties' from the STOP list to prevent false positives 
+        // if they appear in the text body (e.g. "We bespraken acties...").
         const allHeaders = [
-            'Summary', 'Samenvatting',
-            'Conclusions', 'Conclusies', 'Insights', 'Inzichten',
-            'Action', 'Actie', 'Acties',
-            'Transcription', 'Transcript', 'Transcriptie'
+            'Summary', 
+            'Conclusions', 'Insights',
+            'Action Points', 'Action Items', // Specific enough to be safe
+            'Transcription', 'Transcript'
         ]; 
         
         let nearestNextHeaderIndex = normalizedText.length;
 
         for (const otherH of allHeaders) {
-             const regex = new RegExp(`(?:^|\\n)[\\s\\#\\*\\[]*${otherH}[\\s\\]\\*\\:]*(?:\\n|$)`, 'i');
-             // We need to find matches AFTER bestIndex
+             const regex = new RegExp(`(?:^|\\n|\\r)[\\s\\#\\*\\[]*${otherH}[\\s\\]\\*\\:]*`, 'i');
              const remainingText = normalizedText.slice(bestIndex);
              const match = remainingText.match(regex);
              if (match && match.index !== undefined) {
                  const absoluteIndex = bestIndex + match.index;
-                 if (absoluteIndex < nearestNextHeaderIndex) {
+                 // Ensure we aren't finding the exact same header we just found
+                 if (absoluteIndex > bestIndex && absoluteIndex < nearestNextHeaderIndex) {
                      nearestNextHeaderIndex = absoluteIndex;
                  }
              }
@@ -360,7 +364,8 @@ function extractContent(text: string): MeetingData {
         return cleanMarkdown(normalizedText.slice(bestIndex, nearestNextHeaderIndex));
     };
 
-    // Include both English and Dutch keywords to be safe
+    // We still look for Dutch headers to START a section (fallback), 
+    // but rely on English headers to END a section.
     data.summary = extractSection(['Summary', 'Samenvatting']);
     
     data.conclusions = extractSection(['Conclusions', 'Conclusies', 'Insights', 'Inzichten'])
@@ -368,7 +373,7 @@ function extractContent(text: string): MeetingData {
                         .map(cleanListItem)
                         .filter(l => l.length > 2);
 
-    data.actionItems = extractSection(['Action', 'Actie', 'Acties'])
+    data.actionItems = extractSection(['Action Points', 'Action Items', 'Actiepunten'])
                         .split('\n')
                         .map(cleanListItem)
                         .filter(l => l.length > 2);
