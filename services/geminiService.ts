@@ -21,7 +21,8 @@ export const INITIAL_PIPELINE_STEPS: PipelineStep[] = [
     { id: 15, label: "Transcription", status: 'pending' },
     { id: 16, label: "Token Generation", status: 'pending' },
     { id: 17, label: "Formatting", status: 'pending' },
-    { id: 18, label: "Sync", status: 'pending' }
+    { id: 18, label: "Sync", status: 'pending' },
+    { id: 19, label: "Initializing Overview", status: 'pending' }
 ];
 
 // --- HIGH RES LOGGER (Exported for App.tsx) ---
@@ -340,13 +341,24 @@ export const processMeetingAudio = async (
             if (data.status === 'COMPLETED') {
                  
                  // Force complete all steps
-                 for (let s = 9; s <= 18; s++) setStep(s, 'completed');
+                 for (let s = 9; s <= 17; s++) setStep(s, 'completed');
                  
+                 // Trigger the final "Initializing Overview" step UI to show user we are finishing up
+                 setStep(19, 'processing', 'Parsing...');
+
                  // --- FINAL ANALYTICS LOGGING ---
                  const endTime = Date.now();
                  const durationMs = endTime - startTime;
 
-                 // Prepare Table Data
+                 // -- TECHNICAL LOGBOOK (Deep Dive) --
+                 if (data.executionLogs && Array.isArray(data.executionLogs)) {
+                    console.log("");
+                    console.group(`%c 🛠️ TECHNICAL EXECUTION LOG (Job ${jobId})`, "font-size: 14px; font-weight: bold; color: #0ea5e9; background: #e0f2fe; padding: 4px; border-radius: 4px;");
+                    console.table(data.executionLogs);
+                    console.groupEnd();
+                 }
+
+                 // Prepare Token Table Data
                  const details = data.usage?.details || [];
                  const tableData = details.map((row: any) => ({
                     'Gemini Call': row.step,
@@ -369,7 +381,7 @@ export const processMeetingAudio = async (
                     'Stop Reason': '-'
                  });
 
-                 console.log(""); // Visual break
+                 console.log(""); 
                  console.group(`%c 📊 MISSION REPORT: Job ${jobId}`, "font-size: 14px; font-weight: bold; color: #15803d; background: #dcfce7; padding: 4px; border-radius: 4px;");
                  console.table(tableData);
                  console.groupEnd();
@@ -387,6 +399,10 @@ export const processMeetingAudio = async (
 
                  const parsed = extractContent(data.result);
                  if (data.usage) parsed.usage = data.usage;
+                 
+                 // Mark Initializing Overview as done right before returning
+                 setStep(19, 'completed');
+                 
                  return parsed;
             }
             if (data.status === 'ERROR') {

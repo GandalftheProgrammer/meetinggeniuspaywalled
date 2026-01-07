@@ -52,6 +52,12 @@ export default async (req: Request) => {
 
   const encodedKey = encodeURIComponent(apiKey);
   
+  // Execution Logbook (Local to this function run)
+  const executionLogs: any[] = [];
+  const logTechnical = (step: string, action: string, detail: any) => {
+      executionLogs.push({ step, action, detail, timestamp: new Date().toISOString() });
+  };
+  
   try {
     const payload = await req.json();
     const { jobId, task, mode, model, mimeType, segments } = payload;
@@ -65,7 +71,13 @@ export default async (req: Request) => {
 
     // --- HELPER: LOCAL STATE MANAGEMENT ---
     const updateState = async (updater: (s: any) => void) => {
-        const state = await resultStore.get(resultKey, { type: "json" }) as any || { events: [], status: 'PROCESSING' };
+        const state = await resultStore.get(resultKey, { type: "json" }) as any || { events: [], status: 'PROCESSING', executionLogs: [] };
+        // Merge local execution logs into state
+        if (executionLogs.length > 0) {
+             state.executionLogs = [...(state.executionLogs || []), ...executionLogs];
+             // Clear local buffer so we don't duplicate if we update state multiple times
+             executionLogs.length = 0; 
+        }
         updater(state);
         await resultStore.setJSON(resultKey, state);
     };
@@ -92,6 +104,42 @@ export default async (req: Request) => {
         return buffer;
     };
 
+    // --- HELPER: WRAPPED GOOGLE UPLOAD ---
+    const wrappedUpload = async (buffer: Buffer, displayName: string) => {
+        const start = Date.now();
+        const uri = await uploadToGoogle(buffer, displayName, mimeType, encodedKey);
+        const duration = Date.now() - start;
+        
+        // Extract Extension from mimeType for logging
+        const ext = mimeType.split('/')[1] || 'bin';
+        
+        logTechnical('Upload', displayName, { 
+            uri, 
+            sizeBytes: buffer.length, 
+            durationMs: duration,
+            fileType: ext
+        });
+        return uri;
+    };
+
+    // --- HELPER: WRAPPED GEMINI CALL ---
+    const wrappedGeminiCall = async (fileUris: string[], prompt: string, context: string) => {
+        const start = Date.now();
+        const res = await callGeminiWithFiles(fileUris, mimeType, model, encodedKey, prompt);
+        const duration = Date.now() - start;
+        
+        logTechnical('Gemini', context, {
+            files: fileUris,
+            model,
+            promptLen: prompt.length,
+            durationMs: duration,
+            finishReason: res.finishReason,
+            inputTokens: res.usageMetadata.promptTokenCount,
+            outputTokens: res.usageMetadata.candidatesTokenCount
+        });
+        return { ...res, duration };
+    };
+
     // --- TASK 1: FAST SUMMARY (Runs on Raw Audio) ---
     if (task === 'SUMMARY') {
         await pushEvent(14, 'processing', 'Analyzing...');
@@ -100,19 +148,15 @@ export default async (req: Request) => {
         const buffer = await assembleFile('raw');
 
         // 2. Upload to Google
-        const uri = await uploadToGoogle(buffer, `Raw_${jobId}`, mimeType, encodedKey);
+        const uri = await wrappedUpload(buffer, `Raw_${jobId}`);
         await waitForFileActive(uri, encodedKey);
 
         // 3. Generate Summary
-        const tStart = Date.now();
-        const res = await callGeminiWithFiles(
+        const res = await wrappedGeminiCall(
             [uri], 
-            mimeType, 
-            model, 
-            encodedKey, 
-            PROMPT_SUMMARY_AND_ACTIONS
+            PROMPT_SUMMARY_AND_ACTIONS,
+            'Summary Generation'
         );
-        const duration = Date.now() - tStart;
 
         // 4. Save Result
         await updateState((s) => {
@@ -125,7 +169,7 @@ export default async (req: Request) => {
                     input: res.usageMetadata.promptTokenCount, 
                     output: res.usageMetadata.candidatesTokenCount,
                     finishReason: res.finishReason,
-                    duration: duration
+                    duration: res.duration
                 }]
             };
             s.status = 'COMPLETED';
@@ -150,7 +194,7 @@ export default async (req: Request) => {
         
         for (const seg of segments) {
             const buffer = await assembleFile(seg.index);
-            const uri = await uploadToGoogle(buffer, `Seg_${jobId}_${seg.index}`, mimeType, encodedKey);
+            const uri = await wrappedUpload(buffer, `Seg_${jobId}_${seg.index}`);
             fileUris.push(uri);
         }
         await pushEvent(11, 'completed');
@@ -166,15 +210,13 @@ export default async (req: Request) => {
         
         const tasks = fileUris.map(async (uri, idx) => {
             const prompt = `${PROMPT_VERBATIM_TRANSCRIPT}\n(Part ${idx+1})`;
-            const tStart = Date.now();
-            const res = await callGeminiWithFiles([uri], mimeType, model, encodedKey, prompt);
-            const tEnd = Date.now();
+            const res = await wrappedGeminiCall([uri], prompt, `Transcript Part ${idx+1}`);
             return { 
                 index: idx, 
                 text: res.text, 
                 usage: res.usageMetadata, 
                 finishReason: res.finishReason,
-                duration: tEnd - tStart
+                duration: res.duration
             };
         });
         
@@ -295,7 +337,7 @@ async function callGeminiWithFiles(fileUris: string[], mimeType: string, model: 
         body: JSON.stringify({
             contents: [{ parts }],
             system_instruction: { parts: [{ text: "You are a precise transcriber/analyst. Do not hallucinate." }] },
-            generationConfig: { maxOutputTokens: 8192, temperature: 0.2 }
+            generationConfig: { maxOutputTokens: 32768, temperature: 0.2 }
         })
     });
 
