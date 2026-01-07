@@ -46,8 +46,17 @@ const App: React.FC = () => {
   const [currentRecordingSeconds, setCurrentRecordingSeconds] = useState(0);
   const tokenClientRef = useRef<any>(null);
 
+  // Smart logging: Only adds log if it's different from the previous one
   const addLog = (msg: string) => {
-    setDebugLogs(prev => [...prev, `${new Date().toLocaleTimeString('en-GB')} - ${msg}`]);
+    setDebugLogs(prev => {
+      const lastLogFull = prev[prev.length - 1];
+      // Check if message content matches to prevent polling spam
+      if (lastLogFull) {
+        const parts = lastLogFull.split(' - ');
+        if (parts.length > 1 && parts[1] === msg) return prev;
+      }
+      return [...prev, `${new Date().toLocaleTimeString('en-GB')} - ${msg}`];
+    });
   };
 
   const getAccurateAudioDuration = async (blob: Blob): Promise<number> => {
@@ -242,6 +251,7 @@ const App: React.FC = () => {
     setTitle(finalTitle);
     setAppState(AppState.PROCESSING);
     setError(null);
+    setDebugLogs([]); // Clear previous logs when starting fresh
 
     try {
       // Construction of strict date and time strings for naming

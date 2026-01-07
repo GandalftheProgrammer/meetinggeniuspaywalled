@@ -2,9 +2,11 @@
 import { MeetingData, ProcessingMode, GeminiModel } from '../types';
 
 const SEGMENT_DURATION_SECONDS = 1800; // 30 minutes is optimal for memory and precision
+const TARGET_SAMPLE_RATE = 16000; // 16kHz is sufficient for speech and drastically reduces file size
 
 /**
  * Physically slices an audio blob into multiple segments using the Web Audio API.
+ * Downsamples to 16kHz Mono to minimize file size/upload time while preserving speech quality.
  */
 async function sliceAudioIntoSegments(blob: Blob): Promise<Blob[]> {
     const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -20,10 +22,11 @@ async function sliceAudioIntoSegments(blob: Blob): Promise<Blob[]> {
         const endOffset = Math.min((i + 1) * SEGMENT_DURATION_SECONDS, totalDuration);
         const duration = endOffset - startOffset;
         
+        // Optimize: Force Mono (1 channel) and 16kHz Sample Rate
         const offlineCtx = new OfflineAudioContext(
-            audioBuffer.numberOfChannels,
-            duration * audioBuffer.sampleRate,
-            audioBuffer.sampleRate
+            1, // Mono
+            duration * TARGET_SAMPLE_RATE,
+            TARGET_SAMPLE_RATE
         );
         
         const source = offlineCtx.createBufferSource();
@@ -97,14 +100,15 @@ export const processMeetingAudio = async (
   };
 
   try {
-    log("Step 1/4: Physically slicing audio for maximum precision...");
+    log("Step 1/4: Optimizing audio (16kHz Mono) for fast upload...");
+    // Force .wav type for consistency with the optimized buffer
     const physicalSegments = await sliceAudioIntoSegments(audioBlob);
-    log(`Physical slicing complete: ${physicalSegments.length} segments created.`);
+    log(`Audio prepared: ${physicalSegments.length} segment(s).`);
 
     const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(7)}`;
     const segmentManifest: {index: number, size: number}[] = [];
 
-    log("Step 2/4: Uploading physical segments to cloud storage...");
+    log("Step 2/4: Uploading optimized segments to cloud...");
     for (let i = 0; i < physicalSegments.length; i++) {
         const segmentBlob = physicalSegments[i];
         const totalBytes = segmentBlob.size;
@@ -177,6 +181,7 @@ export const processMeetingAudio = async (
 
 /**
  * Robustly extracts content from a string using JSON or Tag-based logic.
+ * CLEANS UP MARKDOWN ARTIFACTS (like double asterisks) to ensure clean display.
  */
 function extractContent(text: string): MeetingData {
     const data: MeetingData = { transcription: '', summary: '', conclusions: [], actionItems: [] };
@@ -186,7 +191,10 @@ function extractContent(text: string): MeetingData {
         for (const tag of tags) {
             const regex = new RegExp(`\\[${tag}\\]([\\s\\S]*?)(?=\\[|$)`, 'i');
             const match = text.match(regex);
-            if (match) return match[1].trim();
+            if (match) {
+                // Remove bold markers (**) that often clutter headers or lists
+                return match[1].replace(/\*\*/g, '').trim();
+            }
         }
         return null;
     };
@@ -196,8 +204,11 @@ function extractContent(text: string): MeetingData {
     const rawActions = findSection(['ACTIONS']) || '';
     data.transcription = findSection(['TRANSCRIPTION']) || '';
 
-    data.conclusions = rawConclusions.split('\n').map(l => l.replace(/^[\s\-\*•\d\.\)]+/, '').trim()).filter(l => l.length > 2);
-    data.actionItems = rawActions.split('\n').map(l => l.replace(/^[\s\-\*•\d\.\)]+/, '').trim()).filter(l => l.length > 2);
+    // Clean up list items by removing bullets, numbers, and leftover markdown symbols
+    const cleanListItem = (line: string) => line.replace(/^[\s\-\*•\d\.\)]+/, '').trim();
+
+    data.conclusions = rawConclusions.split('\n').map(cleanListItem).filter(l => l.length > 2);
+    data.actionItems = rawActions.split('\n').map(cleanListItem).filter(l => l.length > 2);
 
     return data;
 }
