@@ -290,7 +290,8 @@ async function callGeminiWithFiles(fileUris: string[], mimeType: string, model: 
         body: JSON.stringify({
             contents: [{ parts }],
             system_instruction: { parts: [{ text: "You are a precise data processing engine. Do not output conversational filler." }] },
-            generation_config: { max_output_tokens: 8192, temperature: 0.2 }
+            // CORRECTED: CamelCase for REST API compatibility
+            generationConfig: { maxOutputTokens: 8192, temperature: 0.2 }
         })
     });
 
