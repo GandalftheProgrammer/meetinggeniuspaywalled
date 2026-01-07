@@ -60,43 +60,50 @@ export default async (req: Request) => {
     const resultStore = getStore({ name: "meeting-results", consistency: "strong" });
     const uploadStore = getStore({ name: "meeting-uploads", consistency: "strong" });
 
-    // --- HELPER: EVENT LOGGING ---
-    // We fetch the latest state before pushing to minimize overwrites
+    // Determine target key based on task to prevent overwrites
+    const resultKey = task === 'SUMMARY' ? `${jobId}_summary` : `${jobId}_transcript`;
+
+    // --- HELPER: LOCAL STATE MANAGEMENT ---
+    const updateState = async (updater: (s: any) => void) => {
+        const state = await resultStore.get(resultKey, { type: "json" }) as any || { events: [], status: 'PROCESSING' };
+        updater(state);
+        await resultStore.setJSON(resultKey, state);
+    };
+
     const pushEvent = async (stepId: number, status: string, detail: string = "") => {
-        const currentState = await resultStore.get(jobId, { type: "json" }) as any || { events: [] };
-        // De-duplication check: if last event for this step is same, skip
-        const existing = currentState.events.filter((e: any) => e.stepId === stepId);
-        if (existing.length > 0) {
-            const last = existing[existing.length - 1];
-            if (last.status === status && last.detail === detail) return;
+        await updateState((s) => {
+            s.events.push({ timestamp: Date.now(), stepId, status, detail });
+        });
+    };
+
+    // --- HELPER: ASSEMBLE CHUNKS ---
+    const assembleFile = async (segmentId: string | number) => {
+        let buffer = Buffer.alloc(0);
+        let chunkIdx = 0;
+        while(true) {
+            const key = `${jobId}/${segmentId}/${chunkIdx}`;
+            const b64 = await uploadStore.get(key, { type: 'text' });
+            if (!b64) break;
+            buffer = Buffer.concat([buffer, Buffer.from(b64, 'base64')]);
+            await uploadStore.delete(key); // Cleanup as we go
+            chunkIdx++;
         }
-        
-        currentState.events.push({ timestamp: Date.now(), stepId, status, detail });
-        // Preserve other fields
-        if (!currentState.status) currentState.status = 'PROCESSING';
-        await resultStore.setJSON(jobId, currentState);
+        if (buffer.length === 0) throw new Error(`No data found for ${segmentId}`);
+        return buffer;
     };
 
     // --- TASK 1: FAST SUMMARY (Runs on Raw Audio) ---
     if (task === 'SUMMARY') {
-        // Step 14 (Summary)
         await pushEvent(14, 'processing', 'Analyzing...');
 
-        // 1. Get Raw File
-        const rawKey = `${jobId}/raw`;
-        const rawBase64 = await uploadStore.get(rawKey, { type: 'text' });
-        
-        if (!rawBase64) {
-            throw new Error("Raw audio file missing for summary task");
-        }
+        // 1. Assemble Raw File from Chunks
+        const buffer = await assembleFile('raw');
 
-        // 2. Upload to Google (Single File)
-        const buffer = Buffer.from(rawBase64, 'base64');
+        // 2. Upload to Google
         const uri = await uploadToGoogle(buffer, `Raw_${jobId}`, mimeType, encodedKey);
         await waitForFileActive(uri, encodedKey);
 
         // 3. Generate Summary
-        const tStart = Date.now();
         const res = await callGeminiWithFiles(
             [uri], 
             mimeType, 
@@ -105,50 +112,37 @@ export default async (req: Request) => {
             PROMPT_SUMMARY_AND_ACTIONS
         );
 
-        // 4. Save Partial Result
-        let currentState = await resultStore.get(jobId, { type: "json" }) as any || { events: [] };
-        currentState.partialSummary = {
-            text: res.text,
-            usage: { step: 'Summary', input: res.usageMetadata.promptTokenCount, output: res.usageMetadata.candidatesTokenCount }
-        };
-        await resultStore.setJSON(jobId, currentState);
-        
-        await pushEvent(14, 'completed');
-        
-        // Clean up raw file from blob store to save space
-        await uploadStore.delete(rawKey);
-
-        // Check if we are done
-        await checkFinalize(jobId, resultStore, mode);
+        // 4. Save Result
+        await updateState((s) => {
+            s.result = res.text;
+            s.usage = { 
+                totalInputTokens: res.usageMetadata.promptTokenCount,
+                totalOutputTokens: res.usageMetadata.candidatesTokenCount,
+                details: [{ step: 'Summary', input: res.usageMetadata.promptTokenCount, output: res.usageMetadata.candidatesTokenCount }]
+            };
+            s.status = 'COMPLETED';
+            s.events.push({ timestamp: Date.now(), stepId: 14, status: 'completed' });
+            
+            // If Notes Only mode, we simulate end steps
+            if (mode === 'NOTES_ONLY') {
+                s.events.push({ timestamp: Date.now(), stepId: 18, status: 'completed' });
+            }
+        });
     }
 
     // --- TASK 2: FULL TRANSCRIPT (Runs on Chunks) ---
     else if (task === 'TRANSCRIPT') {
-        // Steps 9-13 (Technical Pipeline) & 15 (Transcript)
+        // Init events for this parallel track
         await pushEvent(9, 'completed'); 
-        await pushEvent(10, 'completed'); // Reassembly assumed handled by manifest
+        await pushEvent(10, 'completed'); 
+        await pushEvent(11, 'processing', `Uploading segments...`);
 
         // 1. Upload Segments
-        await pushEvent(11, 'processing', `Uploading ${segments.length} segments`);
         const fileUris: string[] = [];
         
         for (const seg of segments) {
-            const segIdx = seg.index;
-            // Assemble chunked segment
-            let segmentBuffer = Buffer.alloc(0);
-            let chunkIdx = 0;
-            while(true) {
-                const chunkKey = `${jobId}/${segIdx}/${chunkIdx}`;
-                const chunkBase64 = await uploadStore.get(chunkKey, { type: 'text' });
-                if (!chunkBase64) break;
-                segmentBuffer = Buffer.concat([segmentBuffer, Buffer.from(chunkBase64, 'base64')]);
-                await uploadStore.delete(chunkKey); // Cleanup
-                chunkIdx++;
-            }
-            
-            if (segmentBuffer.length === 0) throw new Error(`Segment ${segIdx} empty`);
-
-            const uri = await uploadToGoogle(segmentBuffer, `Seg_${jobId}_${segIdx}`, mimeType, encodedKey);
+            const buffer = await assembleFile(seg.index);
+            const uri = await uploadToGoogle(buffer, `Seg_${jobId}_${seg.index}`, mimeType, encodedKey);
             fileUris.push(uri);
         }
         await pushEvent(11, 'completed');
@@ -162,18 +156,10 @@ export default async (req: Request) => {
         await pushEvent(13, 'completed');
         await pushEvent(15, 'processing', `Transcribing ${fileUris.length} parts...`);
         
-        const transcriptParts = [];
-        let totalUsage = { input: 0, output: 0 };
-        
-        // Run sequentially to be safe or parallel with Promise.all
         const tasks = fileUris.map(async (uri, idx) => {
             const prompt = `${PROMPT_VERBATIM_TRANSCRIPT}\n(Part ${idx+1})`;
             const res = await callGeminiWithFiles([uri], mimeType, model, encodedKey, prompt);
-            return {
-                index: idx,
-                text: res.text,
-                usage: res.usageMetadata
-            };
+            return { index: idx, text: res.text, usage: res.usageMetadata };
         });
         
         const results = await Promise.all(tasks);
@@ -181,86 +167,52 @@ export default async (req: Request) => {
         // Sort and Aggregate
         results.sort((a,b) => a.index - b.index);
         const fullTranscript = results.map(r => r.text).join("\n\n");
+        
+        let totalInput = 0;
+        let totalOutput = 0;
         results.forEach(r => {
-             totalUsage.input += r.usage.promptTokenCount;
-             totalUsage.output += r.usage.candidatesTokenCount;
+             totalInput += r.usage.promptTokenCount;
+             totalOutput += r.usage.candidatesTokenCount;
         });
 
-        // 4. Save Partial Result
-        let currentState = await resultStore.get(jobId, { type: "json" }) as any || { events: [] };
-        currentState.partialTranscript = {
-            text: fullTranscript,
-            usage: { step: 'Transcript', input: totalUsage.input, output: totalUsage.output }
-        };
-        await resultStore.setJSON(jobId, currentState);
-
-        await pushEvent(15, 'completed');
-        
-        await checkFinalize(jobId, resultStore, mode);
+        // 4. Save Result
+        await updateState((s) => {
+            s.result = fullTranscript;
+            s.usage = { 
+                totalInputTokens: totalInput,
+                totalOutputTokens: totalOutput,
+                details: [{ step: 'Transcript', input: totalInput, output: totalOutput }]
+            };
+            s.status = 'COMPLETED';
+            s.events.push({ timestamp: Date.now(), stepId: 15, status: 'completed' });
+            // Add final steps
+            s.events.push({ timestamp: Date.now(), stepId: 16, status: 'completed' });
+            s.events.push({ timestamp: Date.now(), stepId: 17, status: 'completed' });
+            s.events.push({ timestamp: Date.now(), stepId: 18, status: 'completed' });
+        });
     }
 
   } catch (err: any) {
     console.error(`[Background Error] ${err.message}`);
     const resultStore = getStore({ name: "meeting-results", consistency: "strong" });
-    const payload = await req.json().catch(() => ({ jobId: 'unknown' }));
-    const currentState = await resultStore.get(payload.jobId, { type: "json" }) as any || { events: [] };
+    const payload = await req.json().catch(() => ({ jobId: 'unknown', task: 'unknown' }));
+    
+    // Fallback error logging to specific key
+    const resultKey = payload.task === 'SUMMARY' ? `${payload.jobId}_summary` : `${payload.jobId}_transcript`;
+    const currentState = await resultStore.get(resultKey, { type: "json" }) as any || { events: [] };
+    
     currentState.status = 'ERROR';
     currentState.error = err.message;
-    await resultStore.setJSON(payload.jobId, currentState);
+    currentState.events.push({ 
+        timestamp: Date.now(), 
+        stepId: payload.task === 'SUMMARY' ? 14 : 15, 
+        status: 'error', 
+        detail: 'Failed' 
+    });
+    
+    await resultStore.setJSON(resultKey, currentState);
   }
 };
-
-// --- HELPER: CHECK IF JOB IS COMPLETE ---
-async function checkFinalize(jobId: string, store: any, mode: string) {
-    const state = await store.get(jobId, { type: "json" }) as any;
-    
-    const needsSummary = mode !== 'TRANSCRIPT_ONLY';
-    const needsTranscript = mode !== 'NOTES_ONLY';
-    
-    const hasSummary = !!state.partialSummary;
-    const hasTranscript = !!state.partialTranscript;
-
-    // Check conditions
-    if ((needsSummary && !hasSummary) || (needsTranscript && !hasTranscript)) {
-        return; // Not done yet
-    }
-
-    // FINALIZE
-    state.events.push({ timestamp: Date.now(), stepId: 16, status: 'completed' });
-    state.events.push({ timestamp: Date.now(), stepId: 17, status: 'completed' });
-    
-    const summaryText = state.partialSummary?.text || "";
-    const transcriptText = state.partialTranscript?.text || "";
-    
-    // Usage Stats
-    const usageDetails = [];
-    let totalInput = 0; 
-    let totalOutput = 0;
-    
-    if (state.partialSummary?.usage) {
-        usageDetails.push(state.partialSummary.usage);
-        totalInput += state.partialSummary.usage.input;
-        totalOutput += state.partialSummary.usage.output;
-    }
-    if (state.partialTranscript?.usage) {
-        usageDetails.push(state.partialTranscript.usage);
-        totalInput += state.partialTranscript.usage.input;
-        totalOutput += state.partialTranscript.usage.output;
-    }
-
-    state.result = `${summaryText}\n\n[TRANSCRIPT]\n${transcriptText}`;
-    state.usage = {
-        totalInputTokens: totalInput,
-        totalOutputTokens: totalOutput,
-        totalTokens: totalInput + totalOutput,
-        details: usageDetails
-    };
-    
-    state.events.push({ timestamp: Date.now(), stepId: 18, status: 'completed' });
-    state.status = 'COMPLETED';
-    
-    await store.setJSON(jobId, state);
-}
 
 // --- HELPER: UPLOAD TO GOOGLE ---
 async function uploadToGoogle(buffer: Buffer, displayName: string, mimeType: string, apiKey: string): Promise<string> {
@@ -279,7 +231,7 @@ async function uploadToGoogle(buffer: Buffer, displayName: string, mimeType: str
     if (!initResp.ok) throw new Error("Google Upload Handshake failed");
     let uploadUrl = initResp.headers.get('x-goog-upload-url');
     if (!uploadUrl) throw new Error("Missing upload URL");
-    if (!uploadUrl.includes('key=')) uploadUrl += `?key=${apiKey}`; // append key if needed, though usually in header for upload? No, URL often has it.
+    if (!uploadUrl.includes('key=')) uploadUrl += `?key=${apiKey}`; 
 
     const finalResp = await fetch(uploadUrl, {
         method: 'POST',

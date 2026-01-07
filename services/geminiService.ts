@@ -47,6 +47,42 @@ export const log = (stepId: number, title: string, data?: any) => {
     console.groupEnd();
 };
 
+// --- HELPER: CHUNKED UPLOAD ---
+async function uploadBlobInChunks(
+    jobId: string, 
+    blob: Blob, 
+    segmentIndex: string | number, 
+    onProgress?: (percent: number) => void
+) {
+    const CHUNK_SIZE = 4 * 1024 * 1024; // 4MB safe limit for Netlify Functions
+    const totalChunks = Math.ceil(blob.size / CHUNK_SIZE);
+    
+    for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
+        const start = chunkIdx * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, blob.size);
+        const chunk = blob.slice(start, end);
+        const base64 = await blobToBase64(chunk);
+        
+        const res = await fetch('/.netlify/functions/gemini', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+                action: 'upload_chunk', 
+                jobId, 
+                chunkIndex: chunkIdx, 
+                segmentIndex: segmentIndex, // Can be 'raw' or number
+                data: base64 
+            })
+        });
+        
+        if (!res.ok) throw new Error(`Upload failed for ${segmentIndex} chunk ${chunkIdx}`);
+        
+        if (onProgress) {
+            onProgress(Math.round(((chunkIdx + 1) / totalChunks) * 100));
+        }
+    }
+}
+
 async function sliceAudioIntoSegments(blob: Blob): Promise<Blob[]> {
     const startT = performance.now();
     log(4, "Starting Audio Decoding & Resampling", { inputSize: blob.size, inputType: blob.type });
@@ -163,30 +199,17 @@ export const processMeetingAudio = async (
 
     // =========================================================================
     // 🚀 TRACK 1: FAST SUMMARY (Parallel)
-    // Uploads original raw blob immediately and triggers summary generation
+    // Uploads original raw blob (Chunked!) immediately and triggers summary generation
     // =========================================================================
     if (mode !== 'TRANSCRIPT_ONLY') {
-        // Fire and forget (handled by Promise.allSettled logic or independent check)
-        // We do not await the BG result here, but we await the upload to ensure data exists.
         (async () => {
             try {
-                log(3, "Starting Fast Summary Track", { jobId });
-                // We use the raw blob for summary to be fast
-                const base64Raw = await blobToBase64(audioBlob);
+                log(3, "Starting Fast Summary Track (Chunked Upload)", { jobId });
                 
-                // Upload Raw
-                await fetch('/.netlify/functions/gemini', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ 
-                        action: 'upload_raw', 
-                        jobId, 
-                        data: base64Raw 
-                    })
-                });
+                // Upload Raw in Chunks
+                await uploadBlobInChunks(jobId, audioBlob, 'raw');
 
                 // Trigger Background Summary
-                // Note: We send 'SUMMARY' task. 
                 await fetch('/.netlify/functions/gemini-background', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -202,7 +225,7 @@ export const processMeetingAudio = async (
                 log(3, "Fast Summary Background Task Triggered");
             } catch (err) {
                 console.warn("Fast summary initiation failed", err);
-                // We don't fail the whole process, the transcript track might still save us
+                setStep(14, 'error', 'Upload Failed');
             }
         })();
     }
@@ -238,42 +261,19 @@ export const processMeetingAudio = async (
 
         // --- STEP 8: SECURE UPLOAD ---
         const totalSegments = physicalSegments.length;
-        const CHUNK_SIZE = 4 * 1024 * 1024;
         
         for (let i = 0; i < totalSegments; i++) {
             const segmentBlob = physicalSegments[i];
-            const totalBytes = segmentBlob.size;
-            const totalChunks = Math.ceil(totalBytes / CHUNK_SIZE);
             
             setStep(8, 'processing', `Uploading seg ${i+1}/${totalSegments} (0%)`);
-            log(8, `Uploading Segment ${i}`, { totalBytes, totalChunks });
+            log(8, `Uploading Segment ${i}`, { size: segmentBlob.size });
             
-            for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
-                const chunkStart = performance.now();
-                const start = chunkIdx * CHUNK_SIZE;
-                const end = Math.min(start + CHUNK_SIZE, totalBytes);
-                const chunk = segmentBlob.slice(start, end);
-                const base64 = await blobToBase64(chunk);
-                
-                const up = await fetch('/.netlify/functions/gemini', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ 
-                        action: 'upload_chunk', 
-                        jobId, 
-                        chunkIndex: chunkIdx, 
-                        segmentIndex: i, 
-                        data: base64 
-                    })
-                });
-                
-                if (!up.ok) throw new Error(`Upload failed for segment ${i} chunk ${chunkIdx}`);
-                const chunkEnd = performance.now();
-
-                const percent = Math.round(((chunkIdx + 1) / totalChunks) * 100);
+            // Reused chunked upload logic
+            await uploadBlobInChunks(jobId, segmentBlob, i, (percent) => {
                 setStep(8, 'processing', `Seg ${i+1}/${totalSegments} (${percent}%)`);
-            }
-            segmentManifest.push({ index: i, size: totalBytes });
+            });
+            
+            segmentManifest.push({ index: i, size: segmentBlob.size });
         }
         setStep(8, 'completed');
 
@@ -294,15 +294,12 @@ export const processMeetingAudio = async (
         });
         if (!triggerResp.ok) throw new Error("Could not start background process.");
     } else {
-        // If NOTES_ONLY, we just skip the transcript track.
-        // The Polling loop will catch the Summary completion.
         log(8, "Skipping Transcript Track (NOTES_ONLY)");
-        // Mark steps as skipped or completed for visual consistency
         [4,5,6,7,8,9,10,11,12,13,15].forEach(id => setStep(id, 'completed', 'Skipped'));
     }
 
-    // --- SMART POLLING LOOP (EVENT REPLAY) ---
-    // This loop listens for updates from BOTH the Summary task (Track 1) and Transcript task (Track 2)
+    // --- SMART POLLING LOOP (EVENT AGGREGATION) ---
+    // Reads merged events from backend to handle split DB states
     log(10, "Entered Event Polling Loop", { intervalMs: 2000 });
     let attempts = 0;
     let nextEventIndex = 0;
