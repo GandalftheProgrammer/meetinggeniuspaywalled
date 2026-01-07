@@ -21,7 +21,8 @@ export const INITIAL_PIPELINE_STEPS: PipelineStep[] = [
     { id: 15, label: "Transcription", status: 'pending' },
     { id: 16, label: "Token Generation", status: 'pending' },
     { id: 17, label: "Formatting", status: 'pending' },
-    { id: 18, label: "Sync", status: 'pending' }
+    { id: 18, label: "Sync", status: 'pending' },
+    { id: 19, label: "Initializing Overview", status: 'pending' }
 ];
 
 // --- HIGH RES LOGGER (Exported for App.tsx) ---
@@ -340,8 +341,17 @@ export const processMeetingAudio = async (
             if (data.status === 'COMPLETED') {
                  
                  // Force complete all steps
-                 for (let s = 9; s <= 18; s++) setStep(s, 'completed');
+                 for (let s = 9; s <= 19; s++) setStep(s, 'completed');
                  
+                 // --- DEEP DIVE LOGGING ---
+                 const ext = defaultMimeType.split('/')[1] || 'bin';
+                 console.log("");
+                 console.groupCollapsed(`%c 🕵️ DEEP DIVE: Job ${jobId}`, "font-size: 13px; font-weight: bold; color: #0284c7; background: #e0f2fe; padding: 2px 6px; border-radius: 4px;");
+                 console.log(`%cFILE METADATA`, "font-weight: bold; color: #334155; margin-bottom: 4px;");
+                 console.log(`• Input Type:   .${ext.toUpperCase()}`);
+                 console.log(`• Input Size:   ${(audioBlob.size/1024/1024).toFixed(2)} MB`);
+                 console.groupEnd();
+
                  // --- FINAL ANALYTICS LOGGING ---
                  const endTime = Date.now();
                  const durationMs = endTime - startTime;
