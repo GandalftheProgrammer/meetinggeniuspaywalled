@@ -2,6 +2,48 @@
 import { getStore } from "@netlify/blobs";
 import { Buffer } from "node:buffer";
 
+// ==================================================================================
+// 🧠 PROMPT CONFIGURATION
+// Adjust these prompts to fine-tune the AI's behavior.
+// ==================================================================================
+
+const PROMPT_SUMMARY_AND_ACTIONS = `
+You are an expert meeting analyst. You are provided with the audio of a full meeting (split into chronological parts).
+Your task is to analyze the COMPLETE interaction across all audio files and output structured notes.
+
+STRICT OUTPUT FORMAT RULES:
+1. Output MUST be in the native language of the speakers (e.g., Dutch if they speak Dutch, English if they speak English).
+2. Do NOT use markdown bolding (double asterisks) in headers or lists. Keep text clean.
+3. Use the following specific tags to separate sections:
+
+[SUMMARY]
+Provide a comprehensive narrative summary of the meeting. Focus on the core topics, debates, and insights.
+
+[CONCLUSIONS]
+List the key decisions and agreements made.
+- Conclusion 1
+- Conclusion 2
+
+[ACTIONS]
+List concrete action items with assignees if mentioned.
+- [ ] Person: Task description
+- [ ] Person: Task description
+
+DO NOT output a transcription in this step. ONLY the notes.
+`;
+
+const PROMPT_VERBATIM_TRANSCRIPT = `
+You are a professional transcriber. You are provided with a specific segment of a meeting.
+Your task is to transcribe this audio segment VERBATIM (word-for-word).
+
+RULES:
+1. Do not summarize. Do not leave out "uhms" or stutters if they change meaning, but generally keep it readable.
+2. If the audio is silent or just noise, output nothing.
+3. Output strictly the transcript text, no intro or outro.
+`;
+
+// ==================================================================================
+
 export default async (req: Request) => {
   if (req.method !== 'POST') return new Response("OK");
 
@@ -20,7 +62,6 @@ export default async (req: Request) => {
 
     const resultStore = getStore({ name: "meeting-results", consistency: "strong" });
     const uploadStore = getStore({ name: "meeting-uploads", consistency: "strong" });
-    const userStore = getStore({ name: "user-profiles", consistency: "strong" });
 
     const updateStatus = async (msg: string) => { 
         console.log(`[Job ${jobId}] ${msg}`); 
@@ -28,14 +69,16 @@ export default async (req: Request) => {
         await resultStore.setJSON(jobId, { ...current, lastLog: msg });
     };
 
-    // --- 1. UPLOAD PHYSICAL SEGMENTS TO GOOGLE ---
-    await updateStatus(`Step 1/3: Moving ${segments.length} physical audio segments to AI Cloud...`);
+    // --- 1. UPLOAD PHYSICAL SEGMENTS TO GOOGLE FILE API ---
+    // We strictly use the Google File API (resumable upload) for robustness with large files.
+    await updateStatus(`Step 1/3: Moving ${segments.length} audio segments to AI Cloud...`);
     const fileUris: string[] = [];
 
     for (const seg of segments) {
         const segIdx = seg.index;
         const totalSize = seg.size;
         
+        // Start Resumable Upload Session
         const handshakeUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodedKey}`;
         const initResp = await fetch(handshakeUrl, {
             method: 'POST',
@@ -52,8 +95,10 @@ export default async (req: Request) => {
         if (!initResp.ok) throw new Error(`Handshake failed for segment ${segIdx}`);
         let uploadUrl = initResp.headers.get('x-goog-upload-url');
         if (!uploadUrl) throw new Error("Missing upload URL");
+        // Ensure API key is attached to the upload URL if missing
         if (!uploadUrl.includes('key=')) uploadUrl = `${uploadUrl}${uploadUrl.includes('?') ? '&' : '?'}key=${encodedKey}`;
 
+        // Stream chunks from Netlify Blob -> Google File API
         let offset = 0;
         const CHUNK_SIZE = 8 * 1024 * 1024;
         let chunkIdx = 0;
@@ -66,9 +111,10 @@ export default async (req: Request) => {
             
             const chunkBuf = Buffer.from(chunkBase64, 'base64');
             buffer = Buffer.concat([buffer, chunkBuf]);
-            await uploadStore.delete(chunkKey);
+            await uploadStore.delete(chunkKey); // Cleanup blob to save space
             chunkIdx++;
 
+            // Upload in 8MB chunks to Google
             while (buffer.length >= CHUNK_SIZE) {
                 const toSend = buffer.subarray(0, CHUNK_SIZE);
                 buffer = buffer.subarray(CHUNK_SIZE);
@@ -86,6 +132,7 @@ export default async (req: Request) => {
             }
         }
 
+        // Finalize upload with remaining buffer
         const finalResp = await fetch(uploadUrl, {
             method: 'POST',
             headers: {
@@ -102,32 +149,45 @@ export default async (req: Request) => {
         await updateStatus(`Segment ${segIdx+1}/${segments.length} uploaded.`);
     }
 
-    // Wait for all to be ACTIVE
+    // Wait for all files to be processed by Google (State: ACTIVE)
     await updateStatus("Waiting for file activation...");
     for (const uri of fileUris) {
         await waitForFileActive(uri, encodedKey);
     }
 
-    // --- 2. PARALLEL SWARM ---
-    await updateStatus("Step 2/3: Launching parallel precision analysis...");
+    // --- 2. EXECUTE AI TASKS ---
+    await updateStatus("Step 2/3: Generating Summary and Transcripts...");
     const swarmTasks: Promise<any>[] = [];
 
-    // Summary Task (receives ALL segments for full context)
+    // TASK A: SUMMARY (Context = ALL Files)
+    // We send ALL file URIs to the model in a single request. 
+    // Gemini treats this as one long sequence, enabling a full meeting summary.
     if (mode !== 'TRANSCRIPT_ONLY') {
         swarmTasks.push((async () => {
-            const res = await callGeminiWithFiles(fileUris, mimeType, "NOTES_ONLY", model, encodedKey);
+            const res = await callGeminiWithFiles(
+                fileUris, // <--- ALL FILES
+                mimeType, 
+                model, 
+                encodedKey, 
+                PROMPT_SUMMARY_AND_ACTIONS
+            );
             return { type: 'NOTES', data: res.text };
         })());
     }
 
-    // Transcription Tasks (EACH segment task is SANDBOXED to its own file)
+    // TASK B: TRANSCRIPTION (Context = Per File)
+    // We treat each segment individually to speed up processing (parallel) and ensure verbatim accuracy.
     if (mode !== 'NOTES_ONLY') {
         fileUris.forEach((uri, idx) => {
             swarmTasks.push((async () => {
-                const prompt = `You are a dedicated transcriber for Segment ${idx+1}. 
-                Transcribe ONLY the audio provided in this specific file. 
-                Verbatim, no summaries, no intro. Start immediately.`;
-                const res = await callGeminiWithFiles([uri], mimeType, "SEGMENT", model, encodedKey, prompt);
+                const prompt = `${PROMPT_VERBATIM_TRANSCRIPT}\n(This is segment ${idx+1} of the meeting)`;
+                const res = await callGeminiWithFiles(
+                    [uri], // <--- SINGLE FILE
+                    mimeType, 
+                    model, 
+                    encodedKey, 
+                    prompt
+                );
                 return { type: 'TRANSCRIPT', index: idx, data: res.text };
             })());
         });
@@ -136,7 +196,7 @@ export default async (req: Request) => {
     const swarmResults = await Promise.all(swarmTasks);
     
     // --- 3. RECONSTRUCT ---
-    await updateStatus("Step 3/3: Reconstructing chronologically...");
+    await updateStatus("Step 3/3: Finalizing report...");
     const transcriptParts = swarmResults.filter(r => r.type === 'TRANSCRIPT').sort((a, b) => a.index - b.index);
     const notesPart = swarmResults.find(r => r.type === 'NOTES');
 
@@ -157,36 +217,36 @@ export default async (req: Request) => {
 
 async function waitForFileActive(fileUri: string, encodedKey: string) {
     const pollUrl = `${fileUri}?key=${encodedKey}`;
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < 60; i++) { // Increased polling to 2 mins for large files
         const r = await fetch(pollUrl);
         const d = await r.json();
         if ((d.state || d.file?.state) === 'ACTIVE') return;
+        if ((d.state || d.file?.state) === 'FAILED') throw new Error("Google File Processing Failed");
         await new Promise(r => setTimeout(r, 2000));
     }
 }
 
-async function callGeminiWithFiles(fileUris: string[], mimeType: string, mode: string, model: string, encodedKey: string, customPrompt?: string): Promise<{text: string}> {
+async function callGeminiWithFiles(fileUris: string[], mimeType: string, model: string, encodedKey: string, promptText: string): Promise<{text: string}> {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodedKey}`;
     
     const parts: any[] = fileUris.map(uri => ({ file_data: { file_uri: uri, mime_type: mimeType } }));
-    
-    let taskText = customPrompt || "";
-    if (mode === 'NOTES_ONLY') {
-        taskText = `Analyze all provided segments. Output strictly using tags: [SUMMARY], [CONCLUSIONS], [ACTIONS]. Use the speakers' native language.`;
-    }
-    parts.push({ text: taskText });
+    parts.push({ text: promptText });
 
     const resp = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             contents: [{ parts }],
-            system_instruction: { parts: [{ text: "High-precision robotic processor. No filler. No conversation. Precise output." }] },
-            generation_config: { max_output_tokens: 8192 }
+            // System instruction helps keep the model purely analytical and non-conversational
+            system_instruction: { parts: [{ text: "You are a precise data processing engine. Do not output conversational filler." }] },
+            generation_config: { max_output_tokens: 8192, temperature: 0.2 }
         })
     });
 
-    if (!resp.ok) throw new Error(`Gemini error: ${resp.status}`);
+    if (!resp.ok) {
+        const errText = await resp.text();
+        throw new Error(`Gemini API Error ${resp.status}: ${errText}`);
+    }
     const data = await resp.json();
     return { text: data.candidates?.[0]?.content?.parts?.[0]?.text || "" };
 }

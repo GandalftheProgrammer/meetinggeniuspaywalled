@@ -1,8 +1,8 @@
 
 import { MeetingData, ProcessingMode, GeminiModel } from '../types';
 
-const SEGMENT_DURATION_SECONDS = 1800; // 30 minutes is optimal for memory and precision
-const TARGET_SAMPLE_RATE = 16000; // 16kHz is sufficient for speech and drastically reduces file size
+const SEGMENT_DURATION_SECONDS = 1800; // 30 minutes
+const TARGET_SAMPLE_RATE = 16000; // 16kHz Mono
 
 /**
  * Physically slices an audio blob into multiple segments using the Web Audio API.
@@ -42,9 +42,6 @@ async function sliceAudioIntoSegments(blob: Blob): Promise<Blob[]> {
     return segments;
 }
 
-/**
- * Converts an AudioBuffer to a WAV Blob.
- */
 function audioBufferToWav(buffer: AudioBuffer): Blob {
     const numOfChan = buffer.numberOfChannels;
     const length = buffer.length * numOfChan * 2 + 44;
@@ -53,20 +50,19 @@ function audioBufferToWav(buffer: AudioBuffer): Blob {
     const channels = [];
     let i, sample, offset = 0, pos = 0;
 
-    // write WAVE header
-    setUint32(0x46464952);                         // "RIFF"
-    setUint32(length - 8);                         // file length - 8
-    setUint32(0x45564157);                         // "WAVE"
-    setUint32(0x20746d66);                         // "fmt " chunk
-    setUint32(16);                                 // length = 16
-    setUint16(1);                                  // PCM (uncompressed)
+    setUint32(0x46464952);                         
+    setUint32(length - 8);                         
+    setUint32(0x45564157);                         
+    setUint32(0x20746d66);                         
+    setUint32(16);                                 
+    setUint16(1);                                  
     setUint16(numOfChan);
     setUint32(buffer.sampleRate);
-    setUint32(buffer.sampleRate * 2 * numOfChan);  // avg. bytes/sec
-    setUint16(numOfChan * 2);                      // block-align
-    setUint16(16);                                 // 16-bit
-    setUint32(0x61746164);                         // "data" - chunk
-    setUint32(length - pos - 4);                   // chunk length
+    setUint32(buffer.sampleRate * 2 * numOfChan);  
+    setUint16(numOfChan * 2);                      
+    setUint16(16);                                 
+    setUint32(0x61746164);                         
+    setUint32(length - pos - 4);                   
 
     for (i = 0; i < buffer.numberOfChannels; i++) channels.push(buffer.getChannelData(i));
 
@@ -101,7 +97,6 @@ export const processMeetingAudio = async (
 
   try {
     log("Step 1/4: Optimizing audio (16kHz Mono) for fast upload...");
-    // Force .wav type for consistency with the optimized buffer
     const physicalSegments = await sliceAudioIntoSegments(audioBlob);
     log(`Audio prepared: ${physicalSegments.length} segment(s).`);
 
@@ -146,6 +141,7 @@ export const processMeetingAudio = async (
         body: JSON.stringify({ 
             jobId, 
             segments: segmentManifest, 
+            // We force audio/wav here because sliceAudioIntoSegments always returns wav
             mimeType: 'audio/wav', 
             mode, 
             model, 
@@ -187,13 +183,15 @@ function extractContent(text: string): MeetingData {
     const data: MeetingData = { transcription: '', summary: '', conclusions: [], actionItems: [] };
     if (!text) return data;
 
+    // Helper to remove double asterisks (**Bold**) often returned by Gemini
+    const cleanMarkdown = (s: string) => s.replace(/\*\*/g, '').trim();
+
     const findSection = (tags: string[]) => {
         for (const tag of tags) {
             const regex = new RegExp(`\\[${tag}\\]([\\s\\S]*?)(?=\\[|$)`, 'i');
             const match = text.match(regex);
             if (match) {
-                // Remove bold markers (**) that often clutter headers or lists
-                return match[1].replace(/\*\*/g, '').trim();
+                return cleanMarkdown(match[1]);
             }
         }
         return null;
@@ -202,10 +200,15 @@ function extractContent(text: string): MeetingData {
     data.summary = findSection(['SUMMARY']) || '';
     const rawConclusions = findSection(['CONCLUSIONS']) || '';
     const rawActions = findSection(['ACTIONS']) || '';
+    
+    // For transcription, we usually prefer to keep some formatting, but user requested clean output
     data.transcription = findSection(['TRANSCRIPTION']) || '';
 
     // Clean up list items by removing bullets, numbers, and leftover markdown symbols
-    const cleanListItem = (line: string) => line.replace(/^[\s\-\*•\d\.\)]+/, '').trim();
+    const cleanListItem = (line: string) => {
+        let cleaned = line.replace(/^[\s\-\*•\d\.\)]+/, ''); // remove bullets/numbers
+        return cleanMarkdown(cleaned);
+    };
 
     data.conclusions = rawConclusions.split('\n').map(cleanListItem).filter(l => l.length > 2);
     data.actionItems = rawActions.split('\n').map(cleanListItem).filter(l => l.length > 2);
