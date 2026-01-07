@@ -1,5 +1,5 @@
 
-import { MeetingData, ProcessingMode, GeminiModel, PipelineStep, PipelineUpdate, TokenUsage } from '../types';
+import { MeetingData, ProcessingMode, GeminiModel, PipelineStep, PipelineUpdate, TokenUsage, PipelineEvent, PipelineStatus } from '../types';
 
 const SEGMENT_DURATION_SECONDS = 1800; // 30 minutes
 const TARGET_SAMPLE_RATE = 16000; // 16kHz Mono
@@ -148,7 +148,7 @@ export const processMeetingAudio = async (
   uid?: string
 ): Promise<MeetingData> => {
   
-  const setStep = (id: number, status: 'processing' | 'completed' | 'error', detail?: string) => {
+  const setStep = (id: number, status: PipelineStatus, detail?: string) => {
       onStepUpdate({ stepId: id, status, detail });
   };
 
@@ -251,14 +251,14 @@ export const processMeetingAudio = async (
     });
     if (!triggerResp.ok) throw new Error("Could not start background process.");
 
-    // --- POLLING LOOP ---
-    log(10, "Entered Polling Loop", { intervalMs: 3000 });
+    // --- SMART POLLING LOOP (EVENT REPLAY) ---
+    log(10, "Entered Event Polling Loop", { intervalMs: 2000 });
     let attempts = 0;
-    let lastRemoteStep = 9;
+    let nextEventIndex = 0;
 
     while (attempts < 1200) {
         attempts++;
-        await new Promise(r => setTimeout(r, 3000));
+        await new Promise(r => setTimeout(r, 2000));
         const poll = await fetch('/.netlify/functions/gemini', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -268,19 +268,30 @@ export const processMeetingAudio = async (
         if (poll.ok) {
             const data = await poll.json();
             
-            // Sync Remote Steps
-            if (data.currentStepId && data.currentStepStatus) {
-                // Log significant remote updates to console
-                if (data.currentStepId !== lastRemoteStep || data.currentStepStatus === 'completed' || (data.currentStepDetail && !data.currentStepDetail.includes('%'))) {
-                     log(data.currentStepId, `Remote Status Update: ${data.currentStepStatus}`, { 
-                        stepId: data.currentStepId,
-                        detail: data.currentStepDetail,
+            // 1. REPLAY EVENTS (Fixes "Missing Steps")
+            if (data.events && Array.isArray(data.events)) {
+                // Only process new events
+                const newEvents = data.events.slice(nextEventIndex);
+                
+                for (const event of newEvents as PipelineEvent[]) {
+                    // Log to console with full detail
+                    log(event.stepId, `Remote Event: ${event.status}`, {
+                        stepId: event.stepId,
+                        status: event.status,
+                        detail: event.detail,
+                        timestamp: new Date(event.timestamp).toLocaleTimeString()
                     });
-                    lastRemoteStep = data.currentStepId;
+
+                    // Update UI
+                    setStep(event.stepId, event.status, event.detail);
                 }
-                setStep(data.currentStepId, data.currentStepStatus, data.currentStepDetail);
+                
+                if (newEvents.length > 0) {
+                    nextEventIndex = data.events.length;
+                }
             }
 
+            // 2. CHECK FINAL STATE
             if (data.status === 'COMPLETED') {
                  log(18, "Process Completed Successfully");
                  
@@ -290,7 +301,7 @@ export const processMeetingAudio = async (
                     console.log(`Total Input Tokens:  ${data.usage.totalInputTokens}`);
                     console.log(`Total Output Tokens: ${data.usage.totalOutputTokens}`);
                     console.log(`Total Cost Basis:    ${data.usage.totalTokens}`);
-                    console.table(data.usage.details);
+                    console.table(data.usage.details); // Should now contain finishReason column
                     console.groupEnd();
                  }
 
@@ -304,7 +315,7 @@ export const processMeetingAudio = async (
                  return parsed;
             }
             if (data.status === 'ERROR') {
-                log(lastRemoteStep, "Remote Error", { error: data.error });
+                log(99, "Remote Error Received", { error: data.error });
                 throw new Error(data.error);
             }
         }

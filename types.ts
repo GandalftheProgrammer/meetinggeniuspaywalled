@@ -27,10 +27,12 @@ export interface TokenUsage {
   totalInputTokens: number;
   totalOutputTokens: number;
   totalTokens: number;
+  finishReason?: string; // Added finishReason
   details?: {
     step: string;
     input: number;
     output: number;
+    finishReason?: string;
   }[];
 }
 
@@ -66,6 +68,14 @@ export interface PipelineStep {
 }
 
 export interface PipelineUpdate {
+  stepId: number;
+  status: PipelineStatus;
+  detail?: string;
+}
+
+// Event Log Pattern
+export interface PipelineEvent {
+  timestamp: number;
   stepId: number;
   status: PipelineStatus;
   detail?: string;

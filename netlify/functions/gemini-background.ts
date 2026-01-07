@@ -71,26 +71,33 @@ export default async (req: Request) => {
     const resultStore = getStore({ name: "meeting-results", consistency: "strong" });
     const uploadStore = getStore({ name: "meeting-uploads", consistency: "strong" });
 
-    // Helper to update the UI Pipeline Step
-    const setStep = async (stepId: number, status: string, detail: string = "") => {
-        const current = await resultStore.get(jobId, { type: "json" }) as any || { status: 'PROCESSING' };
-        await resultStore.setJSON(jobId, { 
-            ...current, 
-            currentStepId: stepId,
-            currentStepStatus: status,
-            currentStepDetail: detail
-        });
+    // --- EVENT LOG STATE ---
+    // Instead of overwriting, we append to this history array and save it.
+    // This allows the frontend to 'replay' missing steps.
+    const jobState = {
+        status: 'PROCESSING',
+        events: [] as any[],
+        result: null as any,
+        usage: null as any,
+        error: null as string
+    };
+
+    const pushEvent = async (stepId: number, status: string, detail: string = "") => {
+        const event = { timestamp: Date.now(), stepId, status, detail };
+        jobState.events.push(event);
+        // We persist the entire state object
+        await resultStore.setJSON(jobId, jobState);
     };
 
     // --- 1. SERVER WAKEUP & REASSEMBLY ---
-    await setStep(9, 'processing');
-    await new Promise(r => setTimeout(r, 500)); // Fake cold start visual
-    await setStep(9, 'completed');
+    await pushEvent(9, 'processing');
+    await new Promise(r => setTimeout(r, 500)); 
+    await pushEvent(9, 'completed');
 
-    await setStep(10, 'processing', `Stitching ${segments.length} segments`);
+    await pushEvent(10, 'processing', `Stitching ${segments.length} segments`);
     
     // --- 2. GOOGLE UPLOAD ---
-    await setStep(11, 'processing');
+    await pushEvent(11, 'processing');
     const fileUris: string[] = [];
 
     for (const seg of segments) {
@@ -149,9 +156,9 @@ export default async (req: Request) => {
                 
                 offset += CHUNK_SIZE;
                 
-                // Update granular progress for UI
+                // Update granular progress
                 const progress = Math.min(99, Math.round((offset / totalSize) * 100));
-                await setStep(11, 'processing', `Seg ${segIdx+1} (${progress}%)`);
+                await pushEvent(11, 'processing', `Seg ${segIdx+1} (${progress}%)`);
             }
         }
 
@@ -171,22 +178,22 @@ export default async (req: Request) => {
         fileUris.push(fileResult.file?.uri || fileResult.uri);
     }
     
-    await setStep(10, 'completed');
-    await setStep(11, 'completed');
+    await pushEvent(10, 'completed');
+    await pushEvent(11, 'completed');
 
     // --- 3. VALIDATION ---
-    await setStep(12, 'processing', 'Google Processing...');
+    await pushEvent(12, 'processing', 'Google Processing...');
     for (const uri of fileUris) {
         sLog(12, `Waiting for file activation`, { uri });
         await waitForFileActive(uri, encodedKey);
     }
     sLog(12, "All files active");
-    await setStep(12, 'completed');
+    await pushEvent(12, 'completed');
 
     // --- 4. EXECUTE AI TASKS ---
-    await setStep(13, 'processing', 'Loading Context...');
+    await pushEvent(13, 'processing', 'Loading Context...');
     await new Promise(r => setTimeout(r, 800));
-    await setStep(13, 'completed');
+    await pushEvent(13, 'completed');
 
     const swarmTasks: Promise<any>[] = [];
     
@@ -200,7 +207,7 @@ export default async (req: Request) => {
 
     // TASK A: SUMMARY
     if (mode !== 'TRANSCRIPT_ONLY') {
-        await setStep(14, 'processing', 'Reasoning...');
+        await pushEvent(14, 'processing', 'Reasoning...');
         swarmTasks.push((async () => {
             const tStart = Date.now();
             sLog(14, "Starting Summary Task");
@@ -216,16 +223,21 @@ export default async (req: Request) => {
             return { 
                 type: 'NOTES', 
                 data: res.text,
-                usage: { step: 'Summary', input: res.usageMetadata.promptTokenCount, output: res.usageMetadata.candidatesTokenCount }
+                usage: { 
+                    step: 'Summary', 
+                    input: res.usageMetadata.promptTokenCount, 
+                    output: res.usageMetadata.candidatesTokenCount,
+                    finishReason: res.finishReason
+                }
             };
         })());
     } else {
-        await setStep(14, 'completed', 'Skipped');
+        await pushEvent(14, 'completed', 'Skipped');
     }
 
     // TASK B: TRANSCRIPTION
     if (mode !== 'NOTES_ONLY') {
-        await setStep(15, 'processing', `Transcribing ${fileUris.length} segments...`);
+        await pushEvent(15, 'processing', `Transcribing ${fileUris.length} segments...`);
         fileUris.forEach((uri, idx) => {
             swarmTasks.push((async () => {
                 const tStart = Date.now();
@@ -243,12 +255,17 @@ export default async (req: Request) => {
                     type: 'TRANSCRIPT', 
                     index: idx, 
                     data: res.text,
-                    usage: { step: `Transcript Seg ${idx+1}`, input: res.usageMetadata.promptTokenCount, output: res.usageMetadata.candidatesTokenCount }
+                    usage: { 
+                        step: `Transcript Seg ${idx+1}`, 
+                        input: res.usageMetadata.promptTokenCount, 
+                        output: res.usageMetadata.candidatesTokenCount,
+                        finishReason: res.finishReason
+                    }
                 };
             })());
         });
     } else {
-         await setStep(15, 'completed', 'Skipped');
+         await pushEvent(15, 'completed', 'Skipped');
     }
 
     // WAIT FOR RESULTS
@@ -264,10 +281,10 @@ export default async (req: Request) => {
     });
     usageStats.totalTokens = usageStats.totalInputTokens + usageStats.totalOutputTokens;
 
-    await setStep(14, 'completed');
-    await setStep(15, 'completed');
+    await pushEvent(14, 'completed');
+    await pushEvent(15, 'completed');
     
-    await setStep(16, 'processing', 'Generating Tokens...');
+    await pushEvent(16, 'processing', 'Generating Tokens...');
     
     // --- 5. RECONSTRUCT ---
     const transcriptParts = swarmResults.filter(r => r.type === 'TRANSCRIPT').sort((a, b) => a.index - b.index);
@@ -276,25 +293,30 @@ export default async (req: Request) => {
     const finalTranscript = transcriptParts.map(p => p.data.trim()).join("\n\n");
     const finalNotes = notesPart ? notesPart.data : "";
     
-    await setStep(16, 'completed');
+    await pushEvent(16, 'completed');
 
-    await setStep(17, 'processing');
+    await pushEvent(17, 'processing');
     const resultText = `${finalNotes}\n\n[TRANSCRIPTION]\n${finalTranscript}`;
     sLog(17, "Final Result Assembled", { totalLength: resultText.length, totalTokens: usageStats.totalTokens });
-    await setStep(17, 'completed');
+    await pushEvent(17, 'completed');
 
-    await setStep(18, 'processing', 'Saving...');
-    await resultStore.setJSON(jobId, { 
-        status: 'COMPLETED', 
-        result: resultText,
-        usage: usageStats // Pass usage back to client
-    });
+    await pushEvent(18, 'processing', 'Saving...');
+    
+    jobState.status = 'COMPLETED';
+    jobState.result = resultText;
+    jobState.usage = usageStats;
+    await resultStore.setJSON(jobId, jobState);
+
     sLog(18, "Job Completed Successfully");
 
   } catch (err: any) {
     console.error(`[Background Error] ${err.message}`);
     const resultStore = getStore({ name: "meeting-results", consistency: "strong" });
-    await resultStore.setJSON(jobId, { status: 'ERROR', error: err.message });
+    // In error case, we fetch current state to not lose events, then update
+    const current = await resultStore.get(jobId, { type: "json" }) as any || { events: [] };
+    current.status = 'ERROR';
+    current.error = err.message;
+    await resultStore.setJSON(jobId, current);
   }
 };
 
