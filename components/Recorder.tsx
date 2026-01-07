@@ -60,7 +60,6 @@ const Recorder: React.FC<RecorderProps> = ({
   const silentAudioRef = useRef<HTMLAudioElement | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
-  // Sync internal timer when recovery happens
   useEffect(() => {
     if (recoveredSeconds >= 0 && !isRecording) {
       setRecordingTime(recoveredSeconds);
@@ -119,7 +118,8 @@ const Recorder: React.FC<RecorderProps> = ({
   };
 
   const getSupportedMimeType = () => {
-    const types = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/wav'];
+    // Prefer m4a/mp4 for better compression and broader compatibility as requested
+    const types = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/aac', 'audio/wav'];
     for (const type of types) {
       if (MediaRecorder.isTypeSupported(type)) return type;
     }
@@ -294,7 +294,6 @@ const Recorder: React.FC<RecorderProps> = ({
           {isRecording ? <Square className="w-8 h-8 text-white fill-current" /> : isLocked ? <Loader2 className="w-8 h-8 text-white animate-spin" /> : <Circle className="w-8 h-8 text-white fill-current" />}
         </button>
         
-        {/* ACTION CONTAINER: Fixed height only BEFORE and DURING recording. Disappears AFTER recording for clean review. */}
         {!hasRecordedData && (
           <div className="h-[80px] flex flex-col items-center justify-center w-full">
               {!isRecording && (

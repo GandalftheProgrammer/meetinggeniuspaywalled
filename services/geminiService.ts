@@ -16,7 +16,7 @@ export const processMeetingAudio = async (
 
   const mimeType = getMimeTypeFromBlob(audioBlob, defaultMimeType);
 
-  log("Initializing production-ready processing pipeline...");
+  log("Initializing multi-pass processing pipeline...");
   try {
     const totalBytes = audioBlob.size;
     const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(7)}`;
@@ -57,17 +57,26 @@ export const processMeetingAudio = async (
 
     log("Background analysis started. Waiting for Gemini response...");
     let attempts = 0;
-    while (attempts < 600) {
+    let lastKnownLog = "";
+
+    while (attempts < 1200) { // Extended to 1 hour for long 3h files
         attempts++;
-        await new Promise(r => setTimeout(r, 3000));
+        await new Promise(r => setTimeout(r, 4000));
         const pollResp = await fetch('/.netlify/functions/gemini', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ action: 'check_status', jobId })
         });
 
-        if (pollResp.status === 200) {
+        if (pollResp.ok) {
             const data = await pollResp.json();
+            
+            // Handle intermediate progress logs from background function
+            if (data.lastLog && data.lastLog !== lastKnownLog) {
+                log(data.lastLog);
+                lastKnownLog = data.lastLog;
+            }
+
             if (data.status === 'COMPLETED') {
                 log("Processing SUCCESS! Building results...");
                 return parseResponse(data.result, mode);
@@ -75,7 +84,7 @@ export const processMeetingAudio = async (
             if (data.status === 'ERROR') throw new Error(data.error);
         }
     }
-    throw new Error("Timeout: Gemini is taking too long.");
+    throw new Error("Timeout: Gemini is taking too long for this meeting.");
   } catch (error) {
     log(`FATAL: ${error instanceof Error ? error.message : 'Unknown error'}`);
     throw error;
@@ -103,20 +112,19 @@ function blobToBase64(blob: Blob): Promise<string> {
 }
 
 function parseResponse(jsonText: string, mode: ProcessingMode): MeetingData {
-    const cleanText = jsonText.replace(/```json/g, '').replace(/```/g, '').trim();
     try {
-        const rawData = JSON.parse(cleanText);
+        const rawData = JSON.parse(jsonText);
         return {
-            transcription: rawData.transcription || (mode === 'NOTES_ONLY' ? "" : "No transcript returned."),
-            summary: rawData.summary || (mode === 'TRANSCRIPT_ONLY' ? "" : "No summary returned."),
+            transcription: rawData.transcription || "",
+            summary: rawData.summary || "",
             conclusions: Array.isArray(rawData.conclusions) ? rawData.conclusions : [],
             actionItems: Array.isArray(rawData.actionItems) ? rawData.actionItems : []
         };
     } catch (e) {
-        console.error("Parse failed for:", cleanText);
+        console.error("Parse failed for final result:", jsonText);
         return { 
           transcription: "Error parsing result.", 
-          summary: "The AI response could not be parsed as JSON. Please try again.", 
+          summary: "The AI response could not be parsed. Please try again.", 
           conclusions: [], 
           actionItems: [] 
         };

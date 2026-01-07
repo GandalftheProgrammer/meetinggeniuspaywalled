@@ -5,7 +5,7 @@ import { Buffer } from "node:buffer";
 // 5 hours in seconds
 const FREE_LIMIT_SECONDS = 18000;
 
-// Define smart fallback sequences for models to handle 503 Overloads
+// Define smart fallback sequences for models
 const FALLBACK_CHAINS: Record<string, string[]> = {
     'gemini-3-pro-preview': ['gemini-3-pro-preview', 'gemini-2.0-flash', 'gemini-2.5-flash'],
     'gemini-2.5-pro': ['gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-2.5-flash'],
@@ -38,23 +38,21 @@ export default async (req: Request) => {
 
     if (!jobId) return;
 
-    console.log(`[Background] Starting job ${jobId}. Chunks: ${totalChunks}. Size: ${fileSize}`);
+    console.log(`[Background] Starting job ${jobId}. Mode: ${mode}. Size: ${fileSize}`);
 
     const resultStore = getStore({ name: "meeting-results", consistency: "strong" });
     const uploadStore = getStore({ name: "meeting-uploads", consistency: "strong" });
     const userStore = getStore({ name: "user-profiles", consistency: "strong" });
 
-    // Usage check
-    const profile = uid ? await userStore.get(uid, { type: "json" }) as any : null;
-    const estimatedDuration = Math.round(fileSize / 8000);
-    if (profile && !profile.isPro && (profile.secondsUsed + estimatedDuration) > FREE_LIMIT_SECONDS) {
-        throw new Error("Free monthly usage limit reached. Please upgrade.");
-    }
-
-    const updateStatus = async (msg: string) => { console.log(`[Background] ${msg}`); };
+    const updateStatus = async (msg: string) => { 
+        console.log(`[Background] ${msg}`); 
+        // We'll update the blob status to communicate back to the UI which step we are on
+        const currentData = await resultStore.get(jobId, { type: "json" }) || { status: 'PROCESSING' };
+        await resultStore.setJSON(jobId, { ...currentData, lastLog: msg });
+    };
 
     // --- 1. INITIALIZE GEMINI UPLOAD ---
-    await updateStatus("Checkpoint 1: Initializing Resumable Upload...");
+    await updateStatus("Step 1/5: Initializing Cloud Storage...");
     const handshakeUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodedKey}`;
     const initResp = await fetch(handshakeUrl, {
         method: 'POST',
@@ -76,7 +74,7 @@ export default async (req: Request) => {
     }
 
     // --- 2. STITCH & UPLOAD ---
-    await updateStatus("Checkpoint 2: Stitching and Uploading...");
+    await updateStatus("Step 2/5: Uploading audio bytes...");
     const GEMINI_CHUNK_SIZE = 8 * 1024 * 1024;
     let buffer = Buffer.alloc(0);
     let uploadOffset = 0;
@@ -108,8 +106,6 @@ export default async (req: Request) => {
         }
     }
 
-    // --- 3. FINALIZE ---
-    await updateStatus("Checkpoint 3: Finalizing Upload...");
     const finalResp = await fetch(uploadUrl, {
         method: 'POST',
         headers: {
@@ -124,34 +120,66 @@ export default async (req: Request) => {
     const fileResult = await finalResp.json();
     const fileUri = fileResult.file?.uri || fileResult.uri;
 
-    // --- 4. WAIT FOR ACTIVE ---
-    await updateStatus("Checkpoint 4: Waiting for ACTIVE state...");
-    await waitForFileActive(fileUri, encodedKey);
+    // --- 3. WAIT FOR ACTIVE & GET DURATION ---
+    await updateStatus("Step 3/5: AI listening to file...");
+    const fileMetadata = await waitForFileActive(fileUri, encodedKey);
+    
+    // Duration is in seconds. Extract from videoMetadata.duration (often "123.45s")
+    const durationStr = fileMetadata.videoMetadata?.duration || "0s";
+    const totalDurationSeconds = parseFloat(durationStr.replace('s', '')) || (fileSize / 16000); // Rough fallback
+    const estimatedDurationMinutes = Math.ceil(totalDurationSeconds / 60);
 
-    // --- 5. GENERATE CONTENT (EXACT REST STRATEGY) ---
-    await updateStatus("Checkpoint 5: Generating Content...");
-    const modelsToTry = FALLBACK_CHAINS[model] || [model];
-    let resultText = "";
-    let generationSuccess = false;
-
-    for (const currentModel of modelsToTry) {
+    // --- 4. MULTI-PASS GENERATION ---
+    await updateStatus("Step 4/5: Generating high-density notes...");
+    
+    let summaryData: any = { summary: "", conclusions: [], actionItems: [] };
+    if (mode !== 'TRANSCRIPT_ONLY') {
+        const notesJson = await callGemini(fileUri, mimeType, "NOTES_ONLY", model, encodedKey);
         try {
-            resultText = await generateContentREST(fileUri, mimeType, mode, currentModel, encodedKey);
-            generationSuccess = true;
-            break;
-        } catch (e: any) {
-            if (e.message.includes('503') || e.message.includes('429')) continue;
-            throw e;
+            const parsed = JSON.parse(notesJson.replace(/```json/g, '').replace(/```/g, '').trim());
+            summaryData = parsed;
+        } catch (e) {
+            console.error("Notes parse error:", e);
+            summaryData.summary = "Summary generated, but parsing failed.";
         }
     }
 
-    if (!generationSuccess) throw new Error(`Generation failed with all fallbacks.`);
+    let finalTranscription = "";
+    if (mode !== 'NOTES_ONLY') {
+        // SEGMENTED TRANSCRIPTION FOR LONG FILES
+        // We chunk the transcription into 20-minute segments to stay under token limits
+        const segmentSizeMinutes = 20;
+        const totalSegments = Math.ceil(estimatedDurationMinutes / segmentSizeMinutes);
+        
+        for (let s = 0; s < totalSegments; s++) {
+            const startMin = s * segmentSizeMinutes;
+            const endMin = Math.min((s + 1) * segmentSizeMinutes, estimatedDurationMinutes);
+            await updateStatus(`Step 5/5: Transcribing segment ${s + 1}/${totalSegments} (${startMin}-${endMin}m)...`);
+            
+            const segmentPrompt = `Transcribe the audio verbatim from minute ${startMin} to minute ${endMin}. Output raw text only. No summary.`;
+            const segmentText = await callGemini(fileUri, mimeType, "SEGMENT", model, encodedKey, segmentPrompt);
+            
+            finalTranscription += (s > 0 ? "\n\n" : "") + segmentText.trim();
+        }
+    }
 
-    await resultStore.setJSON(jobId, { status: 'COMPLETED', result: resultText });
+    // --- 5. FINALIZE ---
+    const finalResult = {
+        transcription: finalTranscription,
+        summary: summaryData.summary || "",
+        conclusions: summaryData.conclusions || [],
+        actionItems: summaryData.actionItems || []
+    };
 
-    if (profile && !profile.isPro) {
-      profile.secondsUsed += estimatedDuration;
-      await userStore.setJSON(uid, profile);
+    await resultStore.setJSON(jobId, { status: 'COMPLETED', result: JSON.stringify(finalResult) });
+
+    // Update usage
+    if (uid) {
+        const profile = await userStore.get(uid, { type: "json" }) as any;
+        if (profile && !profile.isPro) {
+            profile.secondsUsed += Math.round(totalDurationSeconds);
+            await userStore.setJSON(uid, profile);
+        }
     }
 
     console.log(`[Background] Job ${jobId} Completed Successfully.`);
@@ -163,14 +191,14 @@ export default async (req: Request) => {
   }
 };
 
-async function waitForFileActive(fileUri: string, encodedKey: string) {
+async function waitForFileActive(fileUri: string, encodedKey: string): Promise<any> {
     const pollUrl = `${fileUri}?key=${encodedKey}`;
     for (let i = 0; i < 60; i++) {
         const r = await fetch(pollUrl);
         if (r.ok) {
             const d = await r.json();
             const state = d.state || d.file?.state;
-            if (state === 'ACTIVE') return;
+            if (state === 'ACTIVE') return d.file || d;
             if (state === 'FAILED') throw new Error("File processing failed state: FAILED");
         }
         await new Promise(r => setTimeout(r, 2000));
@@ -178,82 +206,47 @@ async function waitForFileActive(fileUri: string, encodedKey: string) {
     throw new Error("Timeout waiting for ACTIVE");
 }
 
-async function generateContentREST(fileUri: string, mimeType: string, mode: string, model: string, encodedKey: string): Promise<string> {
+async function callGemini(fileUri: string, mimeType: string, mode: string, model: string, encodedKey: string, customPrompt?: string): Promise<string> {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodedKey}`;
 
     const systemInstruction = `You are an expert meeting secretary.
-    1. CRITICAL: Analyze the audio to detect the primary spoken language.
-    2. CRITICAL: All output (transcription, summary, conclusions, action items) MUST be written in the DETECTED LANGUAGE. Do not translate to English unless the audio is in English.
-    3. If the audio is silent or contains only noise, return a valid JSON with empty fields.
-    4. Action items must be EXPLICIT tasks only assigned to specific people if mentioned.
-    5. The Summary must be DETAILED and COMPREHENSIVE. Do not over-summarize; capture the nuance of the discussion, key arguments, and context.
-    6. Conclusions & Insights should be extensive, capturing all decisions, agreed points, and important observations made during the meeting.
-    
-    STRICT OUTPUT FORMAT:
-    You MUST return a raw JSON object (no markdown code blocks) with the following schema:
-    {
-      "transcription": "The full verbatim transcript...",
-      "summary": "A detailed and comprehensive summary of the meeting...",
-      "conclusions": ["Detailed conclusion 1", "Detailed insight 2", "Decision 3"],
-      "actionItems": ["Task 1", "Task 2"]
-    }
-    `;
+    1. Detect the primary language and output everything in that language.
+    2. Focus on accuracy and verbatim results for transcription.
+    3. Use the following instructions based on the request.`;
 
     let taskInstruction = "";
-    if (mode === 'TRANSCRIPT_ONLY') taskInstruction = "Transcribe the audio verbatim in the spoken language. Leave summary/conclusions/actionItems empty.";
-    else if (mode === 'NOTES_ONLY') taskInstruction = "Create detailed structured notes (summary, conclusions, actionItems) in the spoken language. Leave transcription empty.";
-    else taskInstruction = "Transcribe the audio verbatim AND create detailed structured notes in the spoken language.";
+    let responseMimeType = "text/plain";
+
+    if (mode === 'NOTES_ONLY') {
+        responseMimeType = "application/json";
+        taskInstruction = `Create detailed structured notes (summary, conclusions, actionItems). 
+        Return raw JSON with keys: "summary", "conclusions" (array), "actionItems" (array). 
+        Ignore transcription for this call.`;
+    } else {
+        taskInstruction = customPrompt || "Transcribe the audio verbatim.";
+    }
 
     const payload = {
-        contents: [
-            {
-                parts: [
-                    { file_data: { file_uri: fileUri, mime_type: mimeType } },
-                    { text: taskInstruction + "\n\nReturn strict JSON." }
-                ]
-            }
-        ],
-        system_instruction: {
-            parts: [{ text: systemInstruction }]
-        },
+        contents: [{
+            parts: [
+                { file_data: { file_uri: fileUri, mime_type: mimeType } },
+                { text: taskInstruction }
+            ]
+        }],
+        system_instruction: { parts: [{ text: systemInstruction }] },
         generation_config: {
-            response_mime_type: "application/json",
+            response_mime_type: responseMimeType,
             max_output_tokens: 8192
-        },
-        safety_settings: [
-            { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
-            { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
-            { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
-            { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
-        ]
+        }
     };
 
-    let attempts = 0;
-    while (attempts <= 2) {
-        try {
-            const resp = await fetch(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
+    const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
 
-            if (resp.ok) {
-                const data = await resp.json();
-                return data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
-            }
-
-            if (resp.status === 503 || resp.status === 429) {
-                attempts++;
-                await new Promise(r => setTimeout(r, 1000 * attempts));
-                continue;
-            }
-
-            throw new Error(`Generation Failed (${resp.status})`);
-        } catch (e: any) {
-            if (attempts === 2) throw e;
-            attempts++;
-            await new Promise(r => setTimeout(r, 1000));
-        }
-    }
-    throw new Error("Generation loop unexpected end");
+    if (!resp.ok) throw new Error(`Gemini Call Failed (${resp.status}): ${await resp.text()}`);
+    const data = await resp.json();
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
 }
