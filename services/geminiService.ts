@@ -152,6 +152,8 @@ export const processMeetingAudio = async (
       onStepUpdate({ stepId: id, status, detail });
   };
 
+  const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+
   try {
     // --- STEP 3: ANALYSIS ---
     setStep(3, 'processing', `${(audioBlob.size / 1024 / 1024).toFixed(2)} MB`);
@@ -159,99 +161,148 @@ export const processMeetingAudio = async (
     await new Promise(r => setTimeout(r, 600)); 
     setStep(3, 'completed');
 
-    // --- STEP 4: OPTIMIZATION (Resampling) ---
-    setStep(4, 'processing', 'Resampling...');
-    const physicalSegments = await sliceAudioIntoSegments(audioBlob);
-    setStep(4, 'completed', '16kHz Mono');
+    // =========================================================================
+    // 🚀 TRACK 1: FAST SUMMARY (Parallel)
+    // Uploads original raw blob immediately and triggers summary generation
+    // =========================================================================
+    if (mode !== 'TRANSCRIPT_ONLY') {
+        // Fire and forget (handled by Promise.allSettled logic or independent check)
+        // We do not await the BG result here, but we await the upload to ensure data exists.
+        (async () => {
+            try {
+                log(3, "Starting Fast Summary Track", { jobId });
+                // We use the raw blob for summary to be fast
+                const base64Raw = await blobToBase64(audioBlob);
+                
+                // Upload Raw
+                await fetch('/.netlify/functions/gemini', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        action: 'upload_raw', 
+                        jobId, 
+                        data: base64Raw 
+                    })
+                });
 
-    // --- STEP 5: SEGMENTATION ---
-    setStep(5, 'processing');
-    const segmentManifest: {index: number, size: number}[] = [];
-    await new Promise(r => setTimeout(r, 300));
-    setStep(5, 'completed', `${physicalSegments.length} slice(s)`);
-
-    // --- STEP 6: ENCRYPTION & STAGING ---
-    setStep(6, 'processing', 'Chunking...');
-    log(6, "Encryption & Staging", { note: "Preparing chunks for secure upload" });
-    await new Promise(r => setTimeout(r, 400));
-    setStep(6, 'completed');
-
-    const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-    log(6, "Job Created", { jobId });
-
-    // --- STEP 7: CLOUD HANDSHAKE ---
-    setStep(7, 'processing', 'Handshake...');
-    log(7, "Cloud Handshake", { endpoint: "/.netlify/functions/gemini" });
-    await new Promise(r => setTimeout(r, 500));
-    setStep(7, 'completed'); 
-
-    // --- STEP 8: SECURE UPLOAD ---
-    const totalSegments = physicalSegments.length;
-    const CHUNK_SIZE = 4 * 1024 * 1024;
-    
-    for (let i = 0; i < totalSegments; i++) {
-        const segmentBlob = physicalSegments[i];
-        const totalBytes = segmentBlob.size;
-        const totalChunks = Math.ceil(totalBytes / CHUNK_SIZE);
-        
-        // Initial Step 8 state
-        setStep(8, 'processing', `Uploading seg ${i+1}/${totalSegments} (0%)`);
-        log(8, `Uploading Segment ${i}`, { totalBytes, totalChunks });
-        
-        for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
-            const chunkStart = performance.now();
-            const start = chunkIdx * CHUNK_SIZE;
-            const end = Math.min(start + CHUNK_SIZE, totalBytes);
-            const chunk = segmentBlob.slice(start, end);
-            const base64 = await blobToBase64(chunk);
-            
-            const up = await fetch('/.netlify/functions/gemini', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ 
-                    action: 'upload_chunk', 
-                    jobId, 
-                    chunkIndex: chunkIdx, 
-                    segmentIndex: i, 
-                    data: base64 
-                })
-            });
-            
-            if (!up.ok) throw new Error(`Upload failed for segment ${i} chunk ${chunkIdx}`);
-            const chunkEnd = performance.now();
-
-            // Granular Progress Update for UI
-            const percent = Math.round(((chunkIdx + 1) / totalChunks) * 100);
-            setStep(8, 'processing', `Seg ${i+1}/${totalSegments} (${percent}%)`);
-            
-            log(8, `Chunk ${chunkIdx}/${totalChunks} Uploaded`, { 
-                size: chunk.size, 
-                durationMs: (chunkEnd - chunkStart).toFixed(0),
-                progress: `${percent}%`,
-                status: up.status
-            });
-        }
-        segmentManifest.push({ index: i, size: totalBytes });
+                // Trigger Background Summary
+                // Note: We send 'SUMMARY' task. 
+                await fetch('/.netlify/functions/gemini-background', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        jobId, 
+                        task: 'SUMMARY',
+                        mimeType: defaultMimeType, 
+                        mode, 
+                        model, 
+                        uid 
+                    })
+                });
+                log(3, "Fast Summary Background Task Triggered");
+            } catch (err) {
+                console.warn("Fast summary initiation failed", err);
+                // We don't fail the whole process, the transcript track might still save us
+            }
+        })();
     }
-    setStep(8, 'completed');
 
-    // --- TRIGGER BACKGROUND ---
-    log(9, "Triggering Server Background Process", { model, mode, segmentCount: segmentManifest.length });
-    const triggerResp = await fetch('/.netlify/functions/gemini-background', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-            jobId, 
-            segments: segmentManifest, 
-            mimeType: 'audio/wav', 
-            mode, 
-            model, 
-            uid 
-        })
-    });
-    if (!triggerResp.ok) throw new Error("Could not start background process.");
+    // =========================================================================
+    // 🐢 TRACK 2: ROBUST TRANSCRIPTION (Sequential)
+    // Decodes, slices, uploads chunks, triggers full transcript
+    // =========================================================================
+    
+    if (mode !== 'NOTES_ONLY') {
+        // --- STEP 4: OPTIMIZATION (Resampling) ---
+        setStep(4, 'processing', 'Resampling...');
+        const physicalSegments = await sliceAudioIntoSegments(audioBlob);
+        setStep(4, 'completed', '16kHz Mono');
+
+        // --- STEP 5: SEGMENTATION ---
+        setStep(5, 'processing');
+        const segmentManifest: {index: number, size: number}[] = [];
+        await new Promise(r => setTimeout(r, 300));
+        setStep(5, 'completed', `${physicalSegments.length} slice(s)`);
+
+        // --- STEP 6: ENCRYPTION & STAGING ---
+        setStep(6, 'processing', 'Chunking...');
+        log(6, "Encryption & Staging", { jobId });
+        await new Promise(r => setTimeout(r, 400));
+        setStep(6, 'completed');
+
+        // --- STEP 7: CLOUD HANDSHAKE ---
+        setStep(7, 'processing', 'Handshake...');
+        log(7, "Cloud Handshake", { endpoint: "/.netlify/functions/gemini" });
+        await new Promise(r => setTimeout(r, 500));
+        setStep(7, 'completed'); 
+
+        // --- STEP 8: SECURE UPLOAD ---
+        const totalSegments = physicalSegments.length;
+        const CHUNK_SIZE = 4 * 1024 * 1024;
+        
+        for (let i = 0; i < totalSegments; i++) {
+            const segmentBlob = physicalSegments[i];
+            const totalBytes = segmentBlob.size;
+            const totalChunks = Math.ceil(totalBytes / CHUNK_SIZE);
+            
+            setStep(8, 'processing', `Uploading seg ${i+1}/${totalSegments} (0%)`);
+            log(8, `Uploading Segment ${i}`, { totalBytes, totalChunks });
+            
+            for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
+                const chunkStart = performance.now();
+                const start = chunkIdx * CHUNK_SIZE;
+                const end = Math.min(start + CHUNK_SIZE, totalBytes);
+                const chunk = segmentBlob.slice(start, end);
+                const base64 = await blobToBase64(chunk);
+                
+                const up = await fetch('/.netlify/functions/gemini', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        action: 'upload_chunk', 
+                        jobId, 
+                        chunkIndex: chunkIdx, 
+                        segmentIndex: i, 
+                        data: base64 
+                    })
+                });
+                
+                if (!up.ok) throw new Error(`Upload failed for segment ${i} chunk ${chunkIdx}`);
+                const chunkEnd = performance.now();
+
+                const percent = Math.round(((chunkIdx + 1) / totalChunks) * 100);
+                setStep(8, 'processing', `Seg ${i+1}/${totalSegments} (${percent}%)`);
+            }
+            segmentManifest.push({ index: i, size: totalBytes });
+        }
+        setStep(8, 'completed');
+
+        // --- TRIGGER TRANSCRIPT BACKGROUND ---
+        log(9, "Triggering Transcript Background Process", { segmentCount: segmentManifest.length });
+        const triggerResp = await fetch('/.netlify/functions/gemini-background', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+                jobId, 
+                task: 'TRANSCRIPT',
+                segments: segmentManifest, 
+                mimeType: 'audio/wav', // Converted type
+                mode, 
+                model, 
+                uid 
+            })
+        });
+        if (!triggerResp.ok) throw new Error("Could not start background process.");
+    } else {
+        // If NOTES_ONLY, we just skip the transcript track.
+        // The Polling loop will catch the Summary completion.
+        log(8, "Skipping Transcript Track (NOTES_ONLY)");
+        // Mark steps as skipped or completed for visual consistency
+        [4,5,6,7,8,9,10,11,12,13,15].forEach(id => setStep(id, 'completed', 'Skipped'));
+    }
 
     // --- SMART POLLING LOOP (EVENT REPLAY) ---
+    // This loop listens for updates from BOTH the Summary task (Track 1) and Transcript task (Track 2)
     log(10, "Entered Event Polling Loop", { intervalMs: 2000 });
     let attempts = 0;
     let nextEventIndex = 0;
@@ -268,21 +319,18 @@ export const processMeetingAudio = async (
         if (poll.ok) {
             const data = await poll.json();
             
-            // 1. REPLAY EVENTS (Fixes "Missing Steps")
+            // 1. REPLAY EVENTS
             if (data.events && Array.isArray(data.events)) {
                 // Only process new events
                 const newEvents = data.events.slice(nextEventIndex);
                 
                 for (const event of newEvents as PipelineEvent[]) {
-                    // Log to console with full detail
                     log(event.stepId, `Remote Event: ${event.status}`, {
                         stepId: event.stepId,
                         status: event.status,
                         detail: event.detail,
                         timestamp: new Date(event.timestamp).toLocaleTimeString()
                     });
-
-                    // Update UI
                     setStep(event.stepId, event.status, event.detail);
                 }
                 
@@ -295,19 +343,7 @@ export const processMeetingAudio = async (
             if (data.status === 'COMPLETED') {
                  log(18, "Process Completed Successfully");
                  
-                 // --- FINAL REPORT ---
-                 if (data.usage) {
-                    console.group("%c 📊 TOKEN USAGE REPORT", "background: #10b981; color: white; font-weight: bold; padding: 4px 8px; border-radius: 4px;");
-                    console.log(`Total Input Tokens:  ${data.usage.totalInputTokens}`);
-                    console.log(`Total Output Tokens: ${data.usage.totalOutputTokens}`);
-                    console.log(`Total Cost Basis:    ${data.usage.totalTokens}`);
-                    console.table(data.usage.details); // Should now contain finishReason column
-                    console.groupEnd();
-                 }
-
-                 console.log("%c🔍 RAW UNTOUCHED GEMINI OUTPUT:", "background: #000; color: #bada55; padding: 4px; font-weight: bold;", data.result);
-
-                 // Force complete all steps to ensure 100% green UI at the end
+                 // Force complete all steps
                  for (let s = 9; s <= 18; s++) setStep(s, 'completed');
                  
                  const parsed = extractContent(data.result);
@@ -340,14 +376,7 @@ function extractContent(text: string): MeetingData {
         let bestIndex = -1;
 
         for (const kw of headerKeywords) {
-            // IMPROVED REGEX:
-            // 1. Matches start of line/string + prefix chars
-            // 2. Matches the keyword (e.g. "Conclusions")
-            // 3. [^\\]\\n\\r]* : Matches ANY char that is NOT a ']' or Newline. (Consumes " & Insights")
-            // 4. [\\]\\:]* : Consumes the closing bracket or colon if present.
-            // This ensures we get the FULL header line, but stop before the content starts.
             const regex = new RegExp(`(?:^|\\n|\\r)[\\s\\#\\*\\[]*${kw}[^\\]\\n\\r]*[\\]\\:]*`, 'i');
-            
             const match = normalizedText.match(regex);
             if (match && match.index !== undefined) {
                 bestIndex = match.index + match[0].length;

@@ -7,26 +7,24 @@ import { Buffer } from "node:buffer";
 // ==================================================================================
 
 const PROMPT_SUMMARY_AND_ACTIONS = `
-You are an expert meeting analyst. You are provided with the audio of a full meeting (split into chronological parts).
-Your task is to analyze the COMPLETE interaction across all audio files and output structured notes.
+You are an expert meeting analyst. You are provided with the audio of a full meeting.
+Your task is to analyze the interaction and output structured notes.
 
 STRICT OUTPUT FORMAT RULES:
-1. Output MUST be in the native language of the speakers (except for the headers as specified below: these are always in English).
-2. Do NOT use markdown bolding (double asterisks) in headers or lists. Keep text clean.
+1. Output MUST be in the native language of the speakers (headers must be in English).
+2. Do NOT use markdown bolding (double asterisks) in headers or lists.
 3. Do NOT make interpretations yourself, stick with interpretations/insights/agreements made by the speakers.
-4. Use the following specific (English) headers to separate sections (native language):
+4. Use the following specific (English) headers to separate sections:
 
 [Summary]
-Provide a summary by describing the relevant things that were discussed. Focus on the content, not on the personal chit chat (unless relevant).
+Provide a summary by describing the relevant things that were discussed.
 
 [Conclusions & Insights]
 List the key conclusions and insights.
 - Conclusion/insight 1
-- Conclusion/insight 2
 
 [Action Points]
 List of agreed action items.
-- [ ] Person: Task description
 - [ ] Person: Task description
 
 DO NOT output a transcription in this step. ONLY the notes.
@@ -38,9 +36,9 @@ Your task is to transcribe this audio segment VERBATIM (word-for-word).
 
 CRITICAL RULES:
 1. TRANSCRIPT ONLY: Do not summarize.
-2. NO HALLUCINATIONS: If the audio is silent, background noise, or unintelligible, output NOTHING. Do not guess.
-3. NO LOOPS: Do NOT repeat words (like "ja ja ja" or "uh uh uh") in a loop. If a word is repeated purely as a stutter, write it once.
-4. Output strictly the transcript text, no intro or outro.
+2. NO HALLUCINATIONS: If the audio is silent or unintelligible, output NOTHING.
+3. NO LOOPS: Do NOT repeat words in a loop.
+4. Output strictly the transcript text.
 `;
 
 // ==================================================================================
@@ -53,272 +51,250 @@ export default async (req: Request) => {
   if (!apiKey) return;
 
   const encodedKey = encodeURIComponent(apiKey);
-  let jobId: string = "";
-
-  // Server logger helper
-  const sLog = (step: number, msg: string, meta?: any) => {
-     console.log(`[JOB:${jobId}] [STEP ${step}] ${msg}`, meta ? JSON.stringify(meta) : '');
-  };
-
+  
   try {
     const payload = await req.json();
-    const { segments, mimeType, mode, model } = payload;
-    jobId = payload.jobId;
-    if (!jobId) return;
-
-    sLog(9, "Background Process Started", { segmentCount: segments.length, model });
-
+    const { jobId, task, mode, model, mimeType, segments } = payload;
+    
+    // Initialize Stores
     const resultStore = getStore({ name: "meeting-results", consistency: "strong" });
     const uploadStore = getStore({ name: "meeting-uploads", consistency: "strong" });
 
-    // --- EVENT LOG STATE ---
-    // Instead of overwriting, we append to this history array and save it.
-    // This allows the frontend to 'replay' missing steps.
-    const jobState = {
-        status: 'PROCESSING',
-        events: [] as any[],
-        result: null as any,
-        usage: null as any,
-        error: null as string
-    };
-
+    // --- HELPER: EVENT LOGGING ---
+    // We fetch the latest state before pushing to minimize overwrites
     const pushEvent = async (stepId: number, status: string, detail: string = "") => {
-        const event = { timestamp: Date.now(), stepId, status, detail };
-        jobState.events.push(event);
-        // We persist the entire state object
-        await resultStore.setJSON(jobId, jobState);
-    };
-
-    // --- 1. SERVER WAKEUP & REASSEMBLY ---
-    await pushEvent(9, 'processing');
-    await new Promise(r => setTimeout(r, 500)); 
-    await pushEvent(9, 'completed');
-
-    await pushEvent(10, 'processing', `Stitching ${segments.length} segments`);
-    
-    // --- 2. GOOGLE UPLOAD ---
-    await pushEvent(11, 'processing');
-    const fileUris: string[] = [];
-
-    for (const seg of segments) {
-        const segIdx = seg.index;
-        const totalSize = seg.size;
+        const currentState = await resultStore.get(jobId, { type: "json" }) as any || { events: [] };
+        // De-duplication check: if last event for this step is same, skip
+        const existing = currentState.events.filter((e: any) => e.stepId === stepId);
+        if (existing.length > 0) {
+            const last = existing[existing.length - 1];
+            if (last.status === status && last.detail === detail) return;
+        }
         
-        sLog(11, `Initiating Upload for Segment ${segIdx}`, { size: totalSize });
-
-        const handshakeUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodedKey}`;
-        const initResp = await fetch(handshakeUrl, {
-            method: 'POST',
-            headers: {
-                'X-Goog-Upload-Protocol': 'resumable',
-                'X-Goog-Upload-Command': 'start',
-                'X-Goog-Upload-Header-Content-Length': String(totalSize),
-                'X-Goog-Upload-Header-Content-Type': mimeType,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ file: { display_name: `Segment_${jobId}_${segIdx}` } })
-        });
-
-        if (!initResp.ok) throw new Error(`Handshake failed for segment ${segIdx}`);
-        let uploadUrl = initResp.headers.get('x-goog-upload-url');
-        if (!uploadUrl) throw new Error("Missing upload URL");
-        if (!uploadUrl.includes('key=')) uploadUrl = `${uploadUrl}${uploadUrl.includes('?') ? '&' : '?'}key=${encodedKey}`;
-
-        let offset = 0;
-        const CHUNK_SIZE = 8 * 1024 * 1024;
-        let chunkIdx = 0;
-        let buffer = Buffer.alloc(0);
-
-        while (true) {
-            const chunkKey = `${jobId}/${segIdx}/${chunkIdx}`;
-            const chunkBase64 = await uploadStore.get(chunkKey, { type: 'text' });
-            if (!chunkBase64) break;
-            
-            const chunkBuf = Buffer.from(chunkBase64, 'base64');
-            buffer = Buffer.concat([buffer, chunkBuf]);
-            await uploadStore.delete(chunkKey);
-            chunkIdx++;
-
-            while (buffer.length >= CHUNK_SIZE) {
-                sLog(11, `Flushing Buffer`, { offset, chunkSize: CHUNK_SIZE });
-                const toSend = buffer.subarray(0, CHUNK_SIZE);
-                buffer = buffer.subarray(CHUNK_SIZE);
-                await fetch(uploadUrl, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Length': String(CHUNK_SIZE),
-                        'X-Goog-Upload-Command': 'upload',
-                        'X-Goog-Upload-Offset': String(offset),
-                        'Content-Type': 'application/octet-stream'
-                    },
-                    body: toSend
-                });
-                
-                offset += CHUNK_SIZE;
-                
-                // Update granular progress
-                const progress = Math.min(99, Math.round((offset / totalSize) * 100));
-                await pushEvent(11, 'processing', `Seg ${segIdx+1} (${progress}%)`);
-            }
-        }
-
-        sLog(11, `Finalizing Segment ${segIdx}`, { finalSize: buffer.length });
-        const finalResp = await fetch(uploadUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Length': String(buffer.length),
-                'X-Goog-Upload-Command': 'upload, finalize',
-                'X-Goog-Upload-Offset': String(offset),
-                'Content-Type': 'application/octet-stream'
-            },
-            body: buffer
-        });
-        const fileResult = await finalResp.json();
-        sLog(11, `Segment ${segIdx} Uploaded`, { uri: fileResult.file?.uri });
-        fileUris.push(fileResult.file?.uri || fileResult.uri);
-    }
-    
-    await pushEvent(10, 'completed');
-    await pushEvent(11, 'completed');
-
-    // --- 3. VALIDATION ---
-    await pushEvent(12, 'processing', 'Google Processing...');
-    for (const uri of fileUris) {
-        sLog(12, `Waiting for file activation`, { uri });
-        await waitForFileActive(uri, encodedKey);
-    }
-    sLog(12, "All files active");
-    await pushEvent(12, 'completed');
-
-    // --- 4. EXECUTE AI TASKS ---
-    await pushEvent(13, 'processing', 'Loading Context...');
-    await new Promise(r => setTimeout(r, 800));
-    await pushEvent(13, 'completed');
-
-    const swarmTasks: Promise<any>[] = [];
-    
-    // Usage stats container
-    const usageStats = {
-        totalInputTokens: 0,
-        totalOutputTokens: 0,
-        totalTokens: 0,
-        details: [] as any[]
+        currentState.events.push({ timestamp: Date.now(), stepId, status, detail });
+        // Preserve other fields
+        if (!currentState.status) currentState.status = 'PROCESSING';
+        await resultStore.setJSON(jobId, currentState);
     };
 
-    // TASK A: SUMMARY
-    if (mode !== 'TRANSCRIPT_ONLY') {
-        await pushEvent(14, 'processing', 'Reasoning...');
-        swarmTasks.push((async () => {
-            const tStart = Date.now();
-            sLog(14, "Starting Summary Task");
-            const res = await callGeminiWithFiles(
-                fileUris, 
-                mimeType, 
-                model, 
-                encodedKey, 
-                PROMPT_SUMMARY_AND_ACTIONS
-            );
-            sLog(14, "Summary Task Complete", { duration: Date.now() - tStart, outputLen: res.text.length, finishReason: res.finishReason });
-            
-            return { 
-                type: 'NOTES', 
-                data: res.text,
-                usage: { 
-                    step: 'Summary', 
-                    input: res.usageMetadata.promptTokenCount, 
-                    output: res.usageMetadata.candidatesTokenCount,
-                    finishReason: res.finishReason
-                }
-            };
-        })());
-    } else {
-        await pushEvent(14, 'completed', 'Skipped');
-    }
+    // --- TASK 1: FAST SUMMARY (Runs on Raw Audio) ---
+    if (task === 'SUMMARY') {
+        // Step 14 (Summary)
+        await pushEvent(14, 'processing', 'Analyzing...');
 
-    // TASK B: TRANSCRIPTION
-    if (mode !== 'NOTES_ONLY') {
-        await pushEvent(15, 'processing', `Transcribing ${fileUris.length} segments...`);
-        fileUris.forEach((uri, idx) => {
-            swarmTasks.push((async () => {
-                const tStart = Date.now();
-                sLog(15, `Starting Transcript Task Seg ${idx}`);
-                const prompt = `${PROMPT_VERBATIM_TRANSCRIPT}\n(This is segment ${idx+1} of the meeting)`;
-                const res = await callGeminiWithFiles(
-                    [uri],
-                    mimeType, 
-                    model, 
-                    encodedKey, 
-                    prompt
-                );
-                sLog(15, `Transcript Task Seg ${idx} Complete`, { duration: Date.now() - tStart, outputLen: res.text.length, finishReason: res.finishReason });
-                return { 
-                    type: 'TRANSCRIPT', 
-                    index: idx, 
-                    data: res.text,
-                    usage: { 
-                        step: `Transcript Seg ${idx+1}`, 
-                        input: res.usageMetadata.promptTokenCount, 
-                        output: res.usageMetadata.candidatesTokenCount,
-                        finishReason: res.finishReason
-                    }
-                };
-            })());
-        });
-    } else {
-         await pushEvent(15, 'completed', 'Skipped');
-    }
-
-    // WAIT FOR RESULTS
-    const swarmResults = await Promise.all(swarmTasks);
-    
-    // Aggregate Usage
-    swarmResults.forEach(r => {
-        if (r.usage) {
-            usageStats.details.push(r.usage);
-            usageStats.totalInputTokens += (r.usage.input || 0);
-            usageStats.totalOutputTokens += (r.usage.output || 0);
+        // 1. Get Raw File
+        const rawKey = `${jobId}/raw`;
+        const rawBase64 = await uploadStore.get(rawKey, { type: 'text' });
+        
+        if (!rawBase64) {
+            throw new Error("Raw audio file missing for summary task");
         }
-    });
-    usageStats.totalTokens = usageStats.totalInputTokens + usageStats.totalOutputTokens;
 
-    await pushEvent(14, 'completed');
-    await pushEvent(15, 'completed');
-    
-    await pushEvent(16, 'processing', 'Generating Tokens...');
-    
-    // --- 5. RECONSTRUCT ---
-    const transcriptParts = swarmResults.filter(r => r.type === 'TRANSCRIPT').sort((a, b) => a.index - b.index);
-    const notesPart = swarmResults.find(r => r.type === 'NOTES');
+        // 2. Upload to Google (Single File)
+        const buffer = Buffer.from(rawBase64, 'base64');
+        const uri = await uploadToGoogle(buffer, `Raw_${jobId}`, mimeType, encodedKey);
+        await waitForFileActive(uri, encodedKey);
 
-    const finalTranscript = transcriptParts.map(p => p.data.trim()).join("\n\n");
-    const finalNotes = notesPart ? notesPart.data : "";
-    
-    await pushEvent(16, 'completed');
+        // 3. Generate Summary
+        const tStart = Date.now();
+        const res = await callGeminiWithFiles(
+            [uri], 
+            mimeType, 
+            model, 
+            encodedKey, 
+            PROMPT_SUMMARY_AND_ACTIONS
+        );
 
-    await pushEvent(17, 'processing');
-    const resultText = `${finalNotes}\n\n[TRANSCRIPTION]\n${finalTranscript}`;
-    sLog(17, "Final Result Assembled", { totalLength: resultText.length, totalTokens: usageStats.totalTokens });
-    await pushEvent(17, 'completed');
+        // 4. Save Partial Result
+        let currentState = await resultStore.get(jobId, { type: "json" }) as any || { events: [] };
+        currentState.partialSummary = {
+            text: res.text,
+            usage: { step: 'Summary', input: res.usageMetadata.promptTokenCount, output: res.usageMetadata.candidatesTokenCount }
+        };
+        await resultStore.setJSON(jobId, currentState);
+        
+        await pushEvent(14, 'completed');
+        
+        // Clean up raw file from blob store to save space
+        await uploadStore.delete(rawKey);
 
-    await pushEvent(18, 'processing', 'Saving...');
-    
-    jobState.status = 'COMPLETED';
-    jobState.result = resultText;
-    jobState.usage = usageStats;
-    await resultStore.setJSON(jobId, jobState);
+        // Check if we are done
+        await checkFinalize(jobId, resultStore, mode);
+    }
 
-    sLog(18, "Job Completed Successfully");
+    // --- TASK 2: FULL TRANSCRIPT (Runs on Chunks) ---
+    else if (task === 'TRANSCRIPT') {
+        // Steps 9-13 (Technical Pipeline) & 15 (Transcript)
+        await pushEvent(9, 'completed'); 
+        await pushEvent(10, 'completed'); // Reassembly assumed handled by manifest
+
+        // 1. Upload Segments
+        await pushEvent(11, 'processing', `Uploading ${segments.length} segments`);
+        const fileUris: string[] = [];
+        
+        for (const seg of segments) {
+            const segIdx = seg.index;
+            // Assemble chunked segment
+            let segmentBuffer = Buffer.alloc(0);
+            let chunkIdx = 0;
+            while(true) {
+                const chunkKey = `${jobId}/${segIdx}/${chunkIdx}`;
+                const chunkBase64 = await uploadStore.get(chunkKey, { type: 'text' });
+                if (!chunkBase64) break;
+                segmentBuffer = Buffer.concat([segmentBuffer, Buffer.from(chunkBase64, 'base64')]);
+                await uploadStore.delete(chunkKey); // Cleanup
+                chunkIdx++;
+            }
+            
+            if (segmentBuffer.length === 0) throw new Error(`Segment ${segIdx} empty`);
+
+            const uri = await uploadToGoogle(segmentBuffer, `Seg_${jobId}_${segIdx}`, mimeType, encodedKey);
+            fileUris.push(uri);
+        }
+        await pushEvent(11, 'completed');
+
+        // 2. Validation
+        await pushEvent(12, 'processing');
+        for (const uri of fileUris) await waitForFileActive(uri, encodedKey);
+        await pushEvent(12, 'completed');
+
+        // 3. Transcript Generation
+        await pushEvent(13, 'completed');
+        await pushEvent(15, 'processing', `Transcribing ${fileUris.length} parts...`);
+        
+        const transcriptParts = [];
+        let totalUsage = { input: 0, output: 0 };
+        
+        // Run sequentially to be safe or parallel with Promise.all
+        const tasks = fileUris.map(async (uri, idx) => {
+            const prompt = `${PROMPT_VERBATIM_TRANSCRIPT}\n(Part ${idx+1})`;
+            const res = await callGeminiWithFiles([uri], mimeType, model, encodedKey, prompt);
+            return {
+                index: idx,
+                text: res.text,
+                usage: res.usageMetadata
+            };
+        });
+        
+        const results = await Promise.all(tasks);
+        
+        // Sort and Aggregate
+        results.sort((a,b) => a.index - b.index);
+        const fullTranscript = results.map(r => r.text).join("\n\n");
+        results.forEach(r => {
+             totalUsage.input += r.usage.promptTokenCount;
+             totalUsage.output += r.usage.candidatesTokenCount;
+        });
+
+        // 4. Save Partial Result
+        let currentState = await resultStore.get(jobId, { type: "json" }) as any || { events: [] };
+        currentState.partialTranscript = {
+            text: fullTranscript,
+            usage: { step: 'Transcript', input: totalUsage.input, output: totalUsage.output }
+        };
+        await resultStore.setJSON(jobId, currentState);
+
+        await pushEvent(15, 'completed');
+        
+        await checkFinalize(jobId, resultStore, mode);
+    }
 
   } catch (err: any) {
     console.error(`[Background Error] ${err.message}`);
     const resultStore = getStore({ name: "meeting-results", consistency: "strong" });
-    // In error case, we fetch current state to not lose events, then update
-    const current = await resultStore.get(jobId, { type: "json" }) as any || { events: [] };
-    current.status = 'ERROR';
-    current.error = err.message;
-    await resultStore.setJSON(jobId, current);
+    const payload = await req.json().catch(() => ({ jobId: 'unknown' }));
+    const currentState = await resultStore.get(payload.jobId, { type: "json" }) as any || { events: [] };
+    currentState.status = 'ERROR';
+    currentState.error = err.message;
+    await resultStore.setJSON(payload.jobId, currentState);
   }
 };
+
+// --- HELPER: CHECK IF JOB IS COMPLETE ---
+async function checkFinalize(jobId: string, store: any, mode: string) {
+    const state = await store.get(jobId, { type: "json" }) as any;
+    
+    const needsSummary = mode !== 'TRANSCRIPT_ONLY';
+    const needsTranscript = mode !== 'NOTES_ONLY';
+    
+    const hasSummary = !!state.partialSummary;
+    const hasTranscript = !!state.partialTranscript;
+
+    // Check conditions
+    if ((needsSummary && !hasSummary) || (needsTranscript && !hasTranscript)) {
+        return; // Not done yet
+    }
+
+    // FINALIZE
+    state.events.push({ timestamp: Date.now(), stepId: 16, status: 'completed' });
+    state.events.push({ timestamp: Date.now(), stepId: 17, status: 'completed' });
+    
+    const summaryText = state.partialSummary?.text || "";
+    const transcriptText = state.partialTranscript?.text || "";
+    
+    // Usage Stats
+    const usageDetails = [];
+    let totalInput = 0; 
+    let totalOutput = 0;
+    
+    if (state.partialSummary?.usage) {
+        usageDetails.push(state.partialSummary.usage);
+        totalInput += state.partialSummary.usage.input;
+        totalOutput += state.partialSummary.usage.output;
+    }
+    if (state.partialTranscript?.usage) {
+        usageDetails.push(state.partialTranscript.usage);
+        totalInput += state.partialTranscript.usage.input;
+        totalOutput += state.partialTranscript.usage.output;
+    }
+
+    state.result = `${summaryText}\n\n[TRANSCRIPT]\n${transcriptText}`;
+    state.usage = {
+        totalInputTokens: totalInput,
+        totalOutputTokens: totalOutput,
+        totalTokens: totalInput + totalOutput,
+        details: usageDetails
+    };
+    
+    state.events.push({ timestamp: Date.now(), stepId: 18, status: 'completed' });
+    state.status = 'COMPLETED';
+    
+    await store.setJSON(jobId, state);
+}
+
+// --- HELPER: UPLOAD TO GOOGLE ---
+async function uploadToGoogle(buffer: Buffer, displayName: string, mimeType: string, apiKey: string): Promise<string> {
+    const initResp = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${apiKey}`, {
+        method: 'POST',
+        headers: {
+            'X-Goog-Upload-Protocol': 'resumable',
+            'X-Goog-Upload-Command': 'start',
+            'X-Goog-Upload-Header-Content-Length': String(buffer.length),
+            'X-Goog-Upload-Header-Content-Type': mimeType,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ file: { display_name: displayName } })
+    });
+    
+    if (!initResp.ok) throw new Error("Google Upload Handshake failed");
+    let uploadUrl = initResp.headers.get('x-goog-upload-url');
+    if (!uploadUrl) throw new Error("Missing upload URL");
+    if (!uploadUrl.includes('key=')) uploadUrl += `?key=${apiKey}`; // append key if needed, though usually in header for upload? No, URL often has it.
+
+    const finalResp = await fetch(uploadUrl, {
+        method: 'POST',
+        headers: {
+            'Content-Length': String(buffer.length),
+            'X-Goog-Upload-Command': 'upload, finalize',
+            'X-Goog-Upload-Offset': '0',
+            'Content-Type': 'application/octet-stream'
+        },
+        body: buffer
+    });
+    
+    const fileResult = await finalResp.json();
+    return fileResult.file?.uri || fileResult.uri;
+}
 
 async function waitForFileActive(fileUri: string, encodedKey: string) {
     const pollUrl = `${fileUri}?key=${encodedKey}`;
@@ -331,10 +307,8 @@ async function waitForFileActive(fileUri: string, encodedKey: string) {
     }
 }
 
-// Updated to return full metadata
-async function callGeminiWithFiles(fileUris: string[], mimeType: string, model: string, encodedKey: string, promptText: string): Promise<{text: string, usageMetadata: any, finishReason: string}> {
+async function callGeminiWithFiles(fileUris: string[], mimeType: string, model: string, encodedKey: string, promptText: string) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodedKey}`;
-    
     const parts: any[] = fileUris.map(uri => ({ file_data: { file_uri: uri, mime_type: mimeType } }));
     parts.push({ text: promptText });
 
@@ -343,25 +317,18 @@ async function callGeminiWithFiles(fileUris: string[], mimeType: string, model: 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             contents: [{ parts }],
-            // Stronger system instruction to prevent looping/hallucination
-            system_instruction: { parts: [{ text: "You are a precise transcriber. You DO NOT hallucinate. You DO NOT get stuck in repetition loops. If audio is unclear, output nothing." }] },
-            // CORRECTED: CamelCase for REST API compatibility
+            system_instruction: { parts: [{ text: "You are a precise transcriber/analyst. Do not hallucinate." }] },
             generationConfig: { maxOutputTokens: 8192, temperature: 0.2 }
         })
     });
 
     if (!resp.ok) {
-        const errText = await resp.text();
-        throw new Error(`Gemini API Error ${resp.status}: ${errText}`);
+        const t = await resp.text();
+        throw new Error(`Gemini API Error: ${t}`);
     }
     const data = await resp.json();
-    
-    const candidate = data.candidates?.[0];
-    const text = candidate?.content?.parts?.[0]?.text || "";
-    const finishReason = candidate?.finishReason || "UNKNOWN";
-    
-    // Extract usage metadata (Google returns camelCase in this endpoint usually)
-    const usageMetadata = data.usageMetadata || { promptTokenCount: 0, candidatesTokenCount: 0, totalTokenCount: 0 };
-
-    return { text, usageMetadata, finishReason };
+    return {
+        text: data.candidates?.[0]?.content?.parts?.[0]?.text || "",
+        usageMetadata: data.usageMetadata || { promptTokenCount: 0, candidatesTokenCount: 0 }
+    };
 }

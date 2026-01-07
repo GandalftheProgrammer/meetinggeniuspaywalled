@@ -24,6 +24,15 @@ export default async (req: Request) => {
       return new Response(JSON.stringify({ success: true }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
+    if (action === 'upload_raw') {
+      const { data } = payload;
+      const store = getStore({ name: "meeting-uploads", consistency: "strong" });
+      // Store raw file separately
+      const key = `${jobId}/raw`;
+      await store.set(key, data);
+      return new Response(JSON.stringify({ success: true }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+
     if (action === 'check_status') {
         const store = getStore({ name: "meeting-results", consistency: "strong" });
         const data = await store.get(jobId, { type: "json" });
