@@ -34,7 +34,7 @@ const Results: React.FC<ResultsProps> = ({
 
   const cleanTitle = title.replace(/[()]/g, '').trim();
   
-  // Format dates strictly as requested
+  // Format dates strictly as requested: [Meeting title] on [date] at [time]
   const startTime = sessionDate || new Date();
   const datePart = startTime.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
   const hours = startTime.getHours().toString().padStart(2, '0');
@@ -45,7 +45,7 @@ const Results: React.FC<ResultsProps> = ({
   const dateTimeStrInternal = `${datePart} at ${timePartInternal}`;
 
   // Internal Markdown Content Templates
-  // Format: [type] [Meeting title] \n Recorded on [date] at [time]
+  // Naming logic: [type] [Meeting title] followed by Recorded on [date] at [time]
   const notesMarkdown = `
 # Notes ${cleanTitle}
 Recorded on ${dateTimeStrInternal}
@@ -66,7 +66,7 @@ ${data.actionItems.length > 0 ? data.actionItems.map(item => `- [ ] ${item}`).jo
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    // Strict file naming: [Meeting title] on [date] at [time] - [type].m4a
+    // Strict file naming: [Meeting title] on [date] at [time] - [type].[ext]
     const extension = suffix === 'audio' ? 'm4a' : (blob.type.includes('wav') ? 'wav' : 'webm');
     const fileName = `${cleanTitle} on ${dateTimeStrFilename} - ${suffix}`.replace(/[/\\?%*:|"<>]/g, '-');
     link.download = `${fileName}.${extension}`;
@@ -78,13 +78,14 @@ ${data.actionItems.length > 0 ? data.actionItems.map(item => `- [ ] ${item}`).jo
 
   const downloadAsDoc = (markdown: string, typeSuffix: string) => {
     // Basic Markdown to HTML conversion for local doc download
+    // FIXED: Bullet point regex now uses ^ anchor to prevent hyphens inside titles from being converted to bullets
     let htmlBody = markdown
       .replace(/^# (.*$)/gm, '<h1 style="color:#1e3a8a; margin-bottom:4px; font-size: 24pt;">$1</h1>')
       .replace(/^Recorded on (.*)$/gm, '<p style="color: #64748b; font-style: italic; margin-bottom: 24px; font-size: 11pt;">Recorded on $1</p>')
       .replace(/^## (.*$)/gm, '<h2 style="color:#1e3a8a; margin-top:24px; margin-bottom:12px; font-size: 16pt;">$1</h2>')
       .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-      .replace(/- \[ \] (.*$)/gm, '<li style="margin-bottom:0;">☐ $1</li>')
-      .replace(/- (.*$)/gm, '<li style="margin-bottom:0;">$1</li>');
+      .replace(/^- \[ \] (.*$)/gm, '<li style="margin-bottom:0;">☐ $1</li>')
+      .replace(/^- (.*$)/gm, '<li style="margin-bottom:0;">$1</li>');
 
     htmlBody = htmlBody.replace(/<\/li>\s+(?=<li)/g, '</li>');
     htmlBody = htmlBody.replace(/((?:<li[\s\S]*?<\/li>)+)/g, '<ul style="margin-top:0; margin-bottom:12px; padding-left:20px;">$1</ul>');

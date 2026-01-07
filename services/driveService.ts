@@ -149,17 +149,18 @@ const ensureFolder = async (token: string, sub: string): Promise<string> => {
 };
 
 const convertMarkdownToHtml = (md: string): string => {
-    // Process the strict header logic
+    // Process strictly named internal document headers logic:
     // Header format: [NOTES] Meeting Title OR [TRANSCRIPT] Meeting Title
     // Then Recorded on [date] at [time]
+    // FIXED: Bullet regex now uses ^ anchor to prevent hyphens in the title from being converted to bullets.
     let html = md.trim()
         .replace(/^\[NOTES\] (.*$)/gm, '<h1 class="title">Notes $1</h1>')
         .replace(/^\[TRANSCRIPT\] (.*$)/gm, '<h1 class="title">Transcript $1</h1>')
         .replace(/^Recorded on (.*)$/gm, '<p class="recorded-on">Recorded on $1</p>')
         .replace(/^## (.*$)/gm, '<h2 class="header">$1</h2>')
         .replace(/^### (.*$)/gm, '<h3 class="subheader">$1</h3>')
-        .replace(/- \[ \] (.*$)/gm, '<li>☐ $1</li>')
-        .replace(/- (.*$)/gm, '<li>$1</li>');
+        .replace(/^- \[ \] (.*$)/gm, '<li>☐ $1</li>')
+        .replace(/^- (.*$)/gm, '<li>$1</li>');
 
     html = html.replace(/<\/li>\s+(?=<li)/g, '</li>');
     html = html.replace(/((?:<li>.*?<\/li>)+)/g, '<ul>$1</ul>');
