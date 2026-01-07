@@ -5,16 +5,6 @@ import { Buffer } from "node:buffer";
 // 5 hours in seconds
 const FREE_LIMIT_SECONDS = 18000;
 
-// Define smart fallback sequences for models
-const FALLBACK_CHAINS: Record<string, string[]> = {
-    'gemini-3-pro-preview': ['gemini-3-pro-preview', 'gemini-2.0-flash', 'gemini-2.5-flash'],
-    'gemini-2.5-pro': ['gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-2.5-flash'],
-    'gemini-2.5-flash': ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash-lite'],
-    'gemini-2.5-flash-lite': ['gemini-2.5-flash-lite', 'gemini-2.0-flash-lite', 'gemini-2.5-flash'],
-    'gemini-2.0-flash': ['gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
-    'gemini-2.0-flash-lite': ['gemini-2.0-flash-lite', 'gemini-2.5-flash-lite', 'gemini-2.0-flash']
-};
-
 export default async (req: Request) => {
   if (req.method !== 'POST') return new Response("OK");
 
@@ -38,8 +28,6 @@ export default async (req: Request) => {
 
     if (!jobId) return;
 
-    console.log(`[Background] Starting job ${jobId}. Mode: ${mode}. Size: ${fileSize}`);
-
     const resultStore = getStore({ name: "meeting-results", consistency: "strong" });
     const uploadStore = getStore({ name: "meeting-uploads", consistency: "strong" });
     const userStore = getStore({ name: "user-profiles", consistency: "strong" });
@@ -50,8 +38,8 @@ export default async (req: Request) => {
         await resultStore.setJSON(jobId, { ...currentData, lastLog: msg });
     };
 
-    // --- 1. UPLOAD & PROCESS ---
-    await updateStatus("Step 1/3: Preparing audio file for analysis...");
+    // --- 1. PREPARATION ---
+    // Log for step 1 already triggered by frontend service
     
     const handshakeUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodedKey}`;
     const initResp = await fetch(handshakeUrl, {
@@ -124,21 +112,22 @@ export default async (req: Request) => {
     const estimatedDurationMinutes = Math.ceil(totalDurationSeconds / 60);
 
     // --- 2. NOTES GENERATION ---
-    await updateStatus("Step 2/3: Generating high-density notes & summary...");
+    await updateStatus("Step 2/3: Analyzing meeting insights & summary.");
     
     let summaryData: any = { summary: "", conclusions: [], actionItems: [] };
     if (mode !== 'TRANSCRIPT_ONLY') {
-        const notesJson = await callGemini(fileUri, mimeType, "NOTES_ONLY", model, encodedKey);
-        try {
-            const cleanJson = notesJson.replace(/```json/g, '').replace(/```/g, '').trim();
-            summaryData = JSON.parse(cleanJson);
-        } catch (e) {
-            console.error("Notes parse error:", e);
-            summaryData.summary = "Summary generated, but parsing failed.";
+        const notesJsonRaw = await callGeminiWithRetry(fileUri, mimeType, "NOTES_ONLY", model, encodedKey);
+        const parsed = extractJson(notesJsonRaw);
+        if (parsed) {
+            summaryData = parsed;
+        } else {
+            summaryData.summary = "Analysis complete, but details were unexpectedly formatted. Check transcript.";
         }
     }
 
     // --- 3. TRANSCRIPTION ---
+    await updateStatus("Step 3/3: Generating verbatim transcription.");
+    
     let finalTranscription = "";
     if (mode !== 'NOTES_ONLY') {
         const segmentSizeMinutes = 20;
@@ -147,12 +136,16 @@ export default async (req: Request) => {
         for (let s = 0; s < totalSegments; s++) {
             const startMin = s * segmentSizeMinutes;
             const endMin = Math.min((s + 1) * segmentSizeMinutes, estimatedDurationMinutes);
-            await updateStatus(`Step 3/3: Transcribing audio segment ${s + 1}/${totalSegments} (${startMin}-${endMin}m)...`);
             
-            const segmentPrompt = `Transcribe the audio verbatim from minute ${startMin} to minute ${endMin}. Output raw text only. No summary.`;
-            const segmentText = await callGemini(fileUri, mimeType, "SEGMENT", model, encodedKey, segmentPrompt);
-            
-            finalTranscription += (s > 0 ? "\n\n" : "") + segmentText.trim();
+            // Per-segment retry wrapper to "keep listening"
+            try {
+                const segmentPrompt = `Transcribe verbatim: ${startMin}-${endMin} minutes. RAW TEXT ONLY. NO COMMENTARY.`;
+                const segmentText = await callGeminiWithRetry(fileUri, mimeType, "SEGMENT", model, encodedKey, segmentPrompt);
+                finalTranscription += (s > 0 ? "\n\n" : "") + segmentText.trim();
+            } catch (segErr) {
+                console.error(`Segment ${s} failed after retries:`, segErr);
+                finalTranscription += (s > 0 ? "\n\n" : "") + `[Segment ${startMin}-${endMin}m: Transcription unavailable due to processing error]`;
+            }
         }
     }
 
@@ -195,22 +188,49 @@ async function waitForFileActive(fileUri: string, encodedKey: string): Promise<a
     throw new Error("Timeout waiting for ACTIVE");
 }
 
+function extractJson(text: string): any {
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start === -1 || end === -1) return null;
+    try {
+        return JSON.parse(text.substring(start, end + 1));
+    } catch (e) {
+        return null;
+    }
+}
+
+async function callGeminiWithRetry(fileUri: string, mimeType: string, mode: string, model: string, encodedKey: string, customPrompt?: string, retries = 3): Promise<string> {
+    for (let i = 0; i <= retries; i++) {
+        try {
+            return await callGemini(fileUri, mimeType, mode, model, encodedKey, customPrompt);
+        } catch (e) {
+            if (i === retries) throw e;
+            console.log(`Retry ${i+1}/${retries} after error:`, e);
+            await new Promise(r => setTimeout(r, 3000 * (i + 1)));
+        }
+    }
+    throw new Error("Unexpected retry failure");
+}
+
 async function callGemini(fileUri: string, mimeType: string, mode: string, model: string, encodedKey: string, customPrompt?: string): Promise<string> {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodedKey}`;
 
-    const systemInstruction = `You are an expert meeting secretary.
-    MANDATORY: Detect the primary language of the audio. Output the summary, conclusions, and action items in that EXACT SAME language. Do NOT translate to English unless the source audio is English.
-    Focus on accuracy and verbatim results for transcription.`;
+    const systemInstruction = `You are a professional meeting minutes specialist.
+    MANDATORY LANGUAGE RULE: 
+    1. Identify the primary spoken language in the audio.
+    2. Provide the summary, conclusions, and actionItems in that EXACT SAME language.
+    3. Do NOT translate into English unless the audio itself is in English.
+    
+    Transcription must be strictly verbatim.`;
 
     let taskInstruction = "";
     let responseMimeType = "text/plain";
 
     if (mode === 'NOTES_ONLY') {
         responseMimeType = "application/json";
-        taskInstruction = `Create detailed structured notes (summary, conclusions, actionItems). 
-        Return raw JSON with keys: "summary", "conclusions" (array of strings), "actionItems" (array of strings). 
-        IMPORTANT: Conclusions and actionItems must be arrays of plain strings only. Do not use objects.
-        Output MUST be in the same language as the spoken audio.`;
+        taskInstruction = `Create structured meeting notes. 
+        MANDATORY: Return a raw JSON object with keys: "summary" (string), "conclusions" (array of strings), "actionItems" (array of strings).
+        All values must be in the detected audio language.`;
     } else {
         taskInstruction = customPrompt || "Transcribe the audio verbatim.";
     }

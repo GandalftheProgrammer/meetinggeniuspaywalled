@@ -1,6 +1,53 @@
 
 import { MeetingData, ProcessingMode, GeminiModel } from '../types';
 
+/**
+ * Robustly extracts the JSON block from a string that might contain other text.
+ */
+function extractJson(text: string): any {
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start === -1 || end === -1 || end < start) return null;
+    
+    const jsonStr = text.substring(start, end + 1);
+    try {
+        return JSON.parse(jsonStr);
+    } catch (e) {
+        console.error("Failed to parse extracted JSON block:", e);
+        return null;
+    }
+}
+
+/**
+ * Recursively flattens an object or array to ensure only strings are returned.
+ * Looks for common keys like 'text', 'task', etc.
+ */
+function smartUnwrap(item: any): string {
+    if (typeof item === 'string') return item;
+    if (item === null || item === undefined) return '';
+    
+    if (Array.isArray(item)) {
+        return item.map(i => smartUnwrap(i)).join(', ');
+    }
+
+    if (typeof item === 'object') {
+        // Try to find a logical text property
+        const textKeys = ['text', 'task', 'point', 'note', 'description', 'content', 'value'];
+        for (const key of textKeys) {
+            if (item[key] && typeof item[key] === 'string') return item[key];
+        }
+        // If it's a nested object but has no obvious text, stringify it
+        return JSON.stringify(item);
+    }
+    
+    return String(item);
+}
+
+function sanitizeArray(arr: any): string[] {
+    if (!Array.isArray(arr)) return [];
+    return arr.map(item => smartUnwrap(item)).filter(s => s !== '');
+}
+
 export const processMeetingAudio = async (
   audioBlob: Blob, 
   defaultMimeType: string, 
@@ -16,7 +63,6 @@ export const processMeetingAudio = async (
 
   const mimeType = getMimeTypeFromBlob(audioBlob, defaultMimeType);
 
-  log("Initializing multi-pass processing pipeline...");
   try {
     const totalBytes = audioBlob.size;
     const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(7)}`;
@@ -26,14 +72,12 @@ export const processMeetingAudio = async (
     let offset = 0;
     let chunkIndex = 0;
 
-    log(`Total Audio Size: ${(totalBytes / (1024 * 1024)).toFixed(2)} MB`);
+    log("Step 1/3: Securing audio in Cloud (Drive & Analysis Server).");
 
     while (offset < totalBytes) {
         const chunkEnd = Math.min(offset + UPLOAD_CHUNK_SIZE, totalBytes);
         const chunkBlob = audioBlob.slice(offset, chunkEnd);
         const base64Data = await blobToBase64(chunkBlob);
-
-        log(`Uploading chunk ${chunkIndex + 1}/${totalChunks}...`);
 
         const uploadResp = await fetch('/.netlify/functions/gemini', {
             method: 'POST',
@@ -46,7 +90,6 @@ export const processMeetingAudio = async (
         chunkIndex++;
     }
     
-    log("Cloud upload complete. Handshaking with Gemini Worker...");
     const triggerResp = await fetch('/.netlify/functions/gemini-background', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -55,11 +98,10 @@ export const processMeetingAudio = async (
 
     if (!triggerResp.ok) throw new Error("Worker handshake failed.");
 
-    log("Background analysis started. Waiting for Gemini response...");
     let attempts = 0;
     let lastKnownLog = "";
 
-    while (attempts < 1200) { // Extended to 1 hour for long 3h files
+    while (attempts < 1200) { 
         attempts++;
         await new Promise(r => setTimeout(r, 4000));
         const pollResp = await fetch('/.netlify/functions/gemini', {
@@ -71,14 +113,12 @@ export const processMeetingAudio = async (
         if (pollResp.ok) {
             const data = await pollResp.json();
             
-            // Handle intermediate progress logs from background function
             if (data.lastLog && data.lastLog !== lastKnownLog) {
                 log(data.lastLog);
                 lastKnownLog = data.lastLog;
             }
 
             if (data.status === 'COMPLETED') {
-                log("Processing SUCCESS! Building results...");
                 return parseResponse(data.result, mode);
             }
             if (data.status === 'ERROR') throw new Error(data.error);
@@ -111,38 +151,23 @@ function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
-/**
- * Defensive utility to ensure array elements are strings.
- * If an element is an object, attempts to extract text-like properties or strings it.
- */
-function sanitizeArray(arr: any): string[] {
-    if (!Array.isArray(arr)) return [];
-    return arr.map(item => {
-        if (typeof item === 'string') return item;
-        if (item === null || item === undefined) return '';
-        if (typeof item === 'object') {
-            return item.text || item.task || item.description || item.content || JSON.stringify(item);
-        }
-        return String(item);
-    }).filter(s => s !== '');
-}
-
 function parseResponse(jsonText: string, mode: ProcessingMode): MeetingData {
-    try {
-        const rawData = JSON.parse(jsonText);
-        return {
-            transcription: rawData.transcription || "",
-            summary: rawData.summary || "",
-            conclusions: sanitizeArray(rawData.conclusions),
-            actionItems: sanitizeArray(rawData.actionItems)
-        };
-    } catch (e) {
-        console.error("Parse failed for final result:", jsonText);
+    const rawData = extractJson(jsonText);
+    
+    if (!rawData) {
+        console.error("Extraction failed for:", jsonText);
         return { 
           transcription: "Error parsing result.", 
-          summary: "The AI response could not be parsed. Please try again.", 
+          summary: "The AI response was malformed. Please check the audio length and try again.", 
           conclusions: [], 
           actionItems: [] 
         };
     }
+
+    return {
+        transcription: String(rawData.transcription || ""),
+        summary: smartUnwrap(rawData.summary || ""),
+        conclusions: sanitizeArray(rawData.conclusions),
+        actionItems: sanitizeArray(rawData.actionItems)
+    };
 }

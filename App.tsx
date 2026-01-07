@@ -9,7 +9,8 @@ import TermsOfService from './components/TermsOfService';
 import { AppState, MeetingData, ProcessingMode, GeminiModel, UserProfile } from './types';
 import { processMeetingAudio } from './services/geminiService';
 import { initDrive, connectToDrive, uploadAudioToDrive, uploadTextToDrive, disconnectDrive, checkDriveStatus, getAccessToken, ensureValidToken } from './services/driveService';
-import { saveChunkToDB, deleteSessionData, getPendingSessions, getChunksForSession, cleanupOldSessions, SessionMetadata } from './services/db';
+// Fix: Added deleteSessionData to imports
+import { saveChunkToDB, getPendingSessions, getChunksForSession, cleanupOldSessions, deleteSessionData } from './services/db';
 import { Zap, Shield, Cloud, Loader2 } from 'lucide-react';
 
 declare const google: any;
@@ -130,7 +131,6 @@ const App: React.FC = () => {
       localStorage.setItem('mg_user_profile', JSON.stringify(profile));
       localStorage.setItem('mg_logged_in', 'true');
       
-      // Explicitly check drive status and update UI state immediately
       if (localStorage.getItem('mg_drive_connected') === 'true' && !getAccessToken()) {
         setIsConnectingDrive(true);
         const token = await checkDriveStatus(uid);
@@ -230,13 +230,14 @@ const App: React.FC = () => {
     if ((window as any).google?.accounts?.id) google.accounts.id.disableAutoSelect();
     setUser(null);
     setIsDriveConnected(false);
-    // Note: We deliberately don't call disconnectDrive(uid) here because we want 
-    // to keep the Drive link persistent in the backend profile for the next login.
     localStorage.removeItem('mg_logged_in');
     localStorage.removeItem('mg_user_profile');
     addLog("Logged out.");
   };
 
+  /**
+   * REORDERED: DRIVE SYNC FIRST
+   */
   const handleProcessAudio = async (mode: ProcessingMode) => {
     if (!combinedBlob || !user) { handleLogin(); return; }
     
@@ -247,56 +248,66 @@ const App: React.FC = () => {
     setError(null);
 
     try {
-      addLog("Starting analysis...");
+      // 1. DRIVE-FIRST: SECURE AUDIO IMMEDIATELY
+      if (localStorage.getItem('mg_drive_connected') === 'true') {
+        addLog("Securing audio in Google Drive...");
+        try {
+            const token = await ensureValidToken(user.uid);
+            if (token) {
+                const startTime = sessionStartTime || new Date();
+                const dateTimeStr = startTime.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }).replace(' at', '');
+                const safeName = `${finalTitle.replace(/[()]/g, '').trim()} - ${dateTimeStr}`;
+                const ext = combinedBlob.type.includes('wav') ? 'wav' : combinedBlob.type.includes('mp4') ? 'm4a' : 'webm';
+                await uploadAudioToDrive(`${safeName} - audio.${ext}`, combinedBlob, user.uid);
+                addLog("Audio safely backed up to Drive.");
+            }
+        } catch (e: any) { addLog(`Warning: Drive backup failed, continuing with analysis: ${e.message}`); }
+      }
+
+      // 2. RUN AI PIPELINE
       const newData = await processMeetingAudio(combinedBlob, combinedBlob.type || 'audio/webm', 'ALL', selectedModel, addLog, user.uid);
+      
+      // 3. COMPLETE
       setMeetingData(newData);
       setAppState(AppState.COMPLETED);
-      deleteSessionData(sessionIdRef.current).catch(() => {});
+      
+      // We no longer automatically delete session data here to maintain 48h retention.
+      // deleteSessionData(sessionIdRef.current).catch(() => {});
+      
       syncUserProfile(user.email, user.uid);
 
+      // 4. SYNC RESULTS TO DRIVE
       if (localStorage.getItem('mg_drive_connected') === 'true') {
-        autoSyncToDrive(newData, finalTitle, combinedBlob);
+        addLog("Syncing results to Google Drive...");
+        const startTime = sessionStartTime || new Date();
+        const dateTimeStr = startTime.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }).replace(' at', '');
+        const cleanTitle = finalTitle.replace(/[()]/g, '').trim();
+        const safeBaseName = `${cleanTitle} - ${dateTimeStr}`;
+
+        try {
+            if (newData.summary || newData.conclusions.length > 0) {
+              const md = `# ${cleanTitle} notes\n*Recorded on ${dateTimeStr}*\n\n${newData.summary}\n\n## Conclusions\n${newData.conclusions.map(i => `- ${i}`).join('\n')}\n\n## Action Items\n${newData.actionItems.map(i => `- ${i}`).join('\n')}`;
+              await uploadTextToDrive(`${safeBaseName} - notes`, md, 'Notes', user.uid);
+            }
+            if (newData.transcription?.trim()) {
+              const tmd = `# ${cleanTitle} transcript\n*Recorded on ${dateTimeStr}*\n\n${newData.transcription}`;
+              await uploadTextToDrive(`${safeBaseName} - transcript`, tmd, 'Transcripts', user.uid);
+            }
+            addLog("Drive sync completed.");
+        } catch (e: any) { addLog(`Drive result sync failed: ${e.message}`); }
       }
+      
+      // Trigger rolling cleanup
+      cleanupOldSessions();
+      
     } catch (apiError: any) {
       setError(apiError.message || 'Processing failed');
       setAppState(AppState.PAUSED); 
     }
   };
 
-  const autoSyncToDrive = async (data: MeetingData, currentTitle: string, blob: Blob | null) => {
-    if (!user) return;
-    const startTime = sessionStartTime || new Date();
-    const dateTimeStr = startTime.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }).replace(' at', '');
-    const cleanTitle = currentTitle.replace(/[()]/g, '').trim();
-    const safeBaseName = `${cleanTitle} - ${dateTimeStr}`;
-
-    addLog("Syncing to Google Drive...");
-    try {
-        const token = await ensureValidToken(user.uid);
-        if (!token) { addLog("Drive connection needs re-auth."); return; }
-
-        if (blob) {
-          addLog("Uploading audio...");
-          const ext = blob.type.includes('wav') ? 'wav' : blob.type.includes('mp4') ? 'm4a' : 'webm';
-          await uploadAudioToDrive(`${safeBaseName} - audio.${ext}`, blob, user.uid);
-        }
-        
-        if (data.summary || data.conclusions.length > 0) {
-          addLog("Uploading notes...");
-          const md = `# ${cleanTitle} notes\n*Recorded on ${dateTimeStr}*\n\n${data.summary}\n\n## Conclusions\n${data.conclusions.map(i => `- ${i}`).join('\n')}\n\n## Action Items\n${data.actionItems.map(i => `- ${i}`).join('\n')}`;
-          await uploadTextToDrive(`${safeBaseName} - notes`, md, 'Notes', user.uid);
-        }
-        
-        if (data.transcription?.trim()) {
-          addLog("Uploading transcript...");
-          const tmd = `# ${cleanTitle} transcript\n*Recorded on ${dateTimeStr}*\n\n${data.transcription}`;
-          await uploadTextToDrive(`${safeBaseName} - transcript`, tmd, 'Transcripts', user.uid);
-        }
-        addLog("Drive sync completed.");
-    } catch (e: any) { addLog(`Drive error: ${e.message}`); }
-  };
-
   const handleDiscard = async () => {
+    // Manually discard data if user chooses to
     await deleteSessionData(sessionIdRef.current);
     setAppState(AppState.IDLE);
     audioChunksRef.current = [];
@@ -431,7 +442,7 @@ const App: React.FC = () => {
         {view === 'main' ? (
           <>
             {error && <div className="max-w-md mx-auto mb-8 p-4 bg-red-50 border border-red-200 text-red-700 rounded-xl text-center text-sm font-bold shadow-sm">{error}</div>}
-            {appState !== AppState.COMPLETED ? renderMainView() : meetingData && <Results data={meetingData} title={title} onReset={handleDiscard} onGenerateMissing={() => {}} isProcessingMissing={false} isDriveConnected={isDriveConnected} onConnectDrive={handleConnectDrive} audioBlob={combinedBlob} initialMode={lastRequestedMode} sessionDateString={sessionStartTime?.toLocaleString('en-GB', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })} />}
+            {appState !== AppState.COMPLETED ? renderMainView() : meetingData && <Results data={meetingData} title={title} onReset={() => setAppState(AppState.PAUSED)} onGenerateMissing={() => {}} isProcessingMissing={false} isDriveConnected={isDriveConnected} onConnectDrive={handleConnectDrive} audioBlob={combinedBlob} initialMode={lastRequestedMode} sessionDateString={sessionStartTime?.toLocaleString('en-GB', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })} />}
           </>
         ) : view === 'privacy' ? <PrivacyPolicy onBack={() => handleNavigate('main')} /> : <TermsOfService onBack={() => handleNavigate('main')} />}
       </main>

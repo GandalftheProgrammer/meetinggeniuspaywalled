@@ -15,7 +15,7 @@ export interface SessionMetadata {
 }
 
 const DB_NAME = 'MeetingGeniusDB';
-const DB_VERSION = 3; // Bumped version for schema update
+const DB_VERSION = 3; 
 const CHUNK_STORE = 'audio_chunks';
 const SESSION_STORE = 'active_sessions';
 
@@ -85,7 +85,6 @@ export const getPendingSessions = async (): Promise<SessionMetadata[]> => {
     const request = store.getAll();
 
     request.onsuccess = () => {
-      // Return all sessions, sorted by lastUpdated descending (most recent first)
       const results = (request.result as SessionMetadata[]).sort((a, b) => b.lastUpdated - a.lastUpdated);
       resolve(results);
     };
@@ -95,8 +94,8 @@ export const getPendingSessions = async (): Promise<SessionMetadata[]> => {
 
 export const cleanupOldSessions = async (): Promise<void> => {
     const db = await initDB();
-    // Increase cleanup limit to 7 days as requested (effectively "no limit" for daily users)
-    const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+    // Rolling cleanup: remove anything older than 48 hours
+    const fortyEightHoursAgo = Date.now() - (48 * 60 * 60 * 1000);
     
     return new Promise((resolve, reject) => {
         const transaction = db.transaction([SESSION_STORE, CHUNK_STORE], 'readwrite');
@@ -107,7 +106,7 @@ export const cleanupOldSessions = async (): Promise<void> => {
         request.onsuccess = () => {
             const sessions = request.result as SessionMetadata[];
             sessions.forEach(s => {
-                if (s.lastUpdated < sevenDaysAgo) {
+                if (s.lastUpdated < fortyEightHoursAgo) {
                     sessionStore.delete(s.sessionId);
                     const index = chunkStore.index('sessionId');
                     const chunkRequest = index.openCursor(IDBKeyRange.only(s.sessionId));
