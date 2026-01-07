@@ -52,12 +52,9 @@ CRITICAL RULES:
 // 📏 TOKEN DEFINITIONS
 // ==================================================================================
 const MAX_OUTPUT_TOKENS = 8192;   // Strict Limit for Gemini Flash/Pro Output
-const MAX_INPUT_TOKENS = 1048576; // 1M Token Context Window
-const MAX_TOTAL_TOKENS = MAX_INPUT_TOKENS + MAX_OUTPUT_TOKENS;
 
 // Thinking Budget Strategy:
-// Summary: ~1500 output needed. 8192 - 1500 = ~6600. We set 6000 for thinking to maximize quality.
-// Transcript: We do NOT define a thinking budget.
+// Summary: We allocate 6000 tokens for thinking.
 const SUMMARY_THINKING_BUDGET = 6000; 
 
 export default async (req: Request) => {
@@ -143,10 +140,7 @@ export default async (req: Request) => {
     const wrappedGeminiCall = async (fileUris: string[], prompt: string, context: string, thinkingBudget?: number) => {
         const start = Date.now();
         
-        // We use the strict constants defined at the top
-        const outputLimit = MAX_OUTPUT_TOKENS; 
-        
-        const res = await callGeminiWithFiles(fileUris, mimeType, model, encodedKey, prompt, outputLimit, thinkingBudget);
+        const res = await callGeminiWithFiles(fileUris, mimeType, model, encodedKey, prompt, MAX_OUTPUT_TOKENS, thinkingBudget);
         const duration = Date.now() - start;
         
         logTechnical('Gemini', context, {
@@ -154,8 +148,6 @@ export default async (req: Request) => {
             model,
             tokenLimits: {
                 maxOutput: MAX_OUTPUT_TOKENS,
-                maxInput: MAX_INPUT_TOKENS,
-                maxTotal: MAX_TOTAL_TOKENS,
                 thinkingBudget: thinkingBudget ?? 'NONE'
             },
             promptLen: prompt.length,
@@ -183,7 +175,7 @@ export default async (req: Request) => {
             [uri], 
             PROMPT_SUMMARY_AND_ACTIONS,
             'Summary Generation',
-            SUMMARY_THINKING_BUDGET // <--- 6000 Tokens for Thinking
+            SUMMARY_THINKING_BUDGET // <--- 6000 Tokens for Thinking ONLY here
         );
 
         // 4. Save Result
@@ -239,6 +231,7 @@ export default async (req: Request) => {
         const tasks = fileUris.map(async (uri, idx) => {
             const prompt = `${PROMPT_VERBATIM_TRANSCRIPT}\n(Part ${idx+1})`;
             // DO NOT PASS THINKING BUDGET FOR TRANSCRIPTS
+            // This ensures undefined is passed, and thinkingConfig is NOT added.
             const res = await wrappedGeminiCall([uri], prompt, `Transcript Part ${idx+1}`);
             return { 
                 index: idx, 
@@ -360,17 +353,15 @@ async function callGeminiWithFiles(fileUris: string[], mimeType: string, model: 
     const parts: any[] = fileUris.map(uri => ({ file_data: { file_uri: uri, mime_type: mimeType } }));
     parts.push({ text: promptText });
 
+    // STANDARD CONFIG ONLY
     const config: any = { 
         maxOutputTokens: maxOutputTokens, 
-        maxInputTokens: MAX_INPUT_TOKENS, // 1M explicit
-        maxTotalTokens: MAX_TOTAL_TOKENS, // 1M + 8192 explicit
         temperature: 0.2,
         topP: 0.95, 
         topK: 40    
     };
 
-    // Apply Thinking Budget if provided (6000 for summary, undefined for transcript)
-    // Note: If undefined, thinkingConfig is not sent, disabling the feature or using default model behavior.
+    // Apply Thinking Budget only if strictly provided
     if (thinkingBudget !== undefined) {
         config.thinkingConfig = { thinkingBudget: thinkingBudget };
     }
