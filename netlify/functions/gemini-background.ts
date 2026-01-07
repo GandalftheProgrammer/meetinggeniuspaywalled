@@ -2,9 +2,6 @@
 import { getStore } from "@netlify/blobs";
 import { Buffer } from "node:buffer";
 
-// 5 hours in seconds
-const FREE_LIMIT_SECONDS = 18000;
-
 export default async (req: Request) => {
   if (req.method !== 'POST') return new Response("OK");
 
@@ -38,9 +35,7 @@ export default async (req: Request) => {
         await resultStore.setJSON(jobId, { ...currentData, lastLog: msg });
     };
 
-    // --- 1. PREPARATION ---
-    // Log for step 1 already triggered by frontend service
-    
+    // --- 1. UPLOAD TO GOOGLE STORAGE ---
     const handshakeUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodedKey}`;
     const initResp = await fetch(handshakeUrl, {
         method: 'POST',
@@ -109,9 +104,9 @@ export default async (req: Request) => {
     const fileMetadata = await waitForFileActive(fileUri, encodedKey);
     const durationStr = fileMetadata.videoMetadata?.duration || "0s";
     const totalDurationSeconds = parseFloat(durationStr.replace('s', '')) || (fileSize / 16000);
-    const estimatedDurationMinutes = Math.ceil(totalDurationSeconds / 60);
+    const totalMinutes = Math.ceil(totalDurationSeconds / 60);
 
-    // --- 2. NOTES GENERATION ---
+    // --- 2. NOTES GENERATION (Step 2/3) ---
     await updateStatus("Step 2/3: Analyzing meeting insights & summary.");
     
     let summaryData: any = { summary: "", conclusions: [], actionItems: [] };
@@ -121,30 +116,47 @@ export default async (req: Request) => {
         if (parsed) {
             summaryData = parsed;
         } else {
-            summaryData.summary = "Analysis complete, but details were unexpectedly formatted. Check transcript.";
+            summaryData.summary = "Deep analysis complete. See the full transcript for more details.";
         }
     }
 
-    // --- 3. TRANSCRIPTION ---
-    await updateStatus("Step 3/3: Generating verbatim transcription.");
-    
+    // --- 3. TRANSCRIPTION (Step 3/3) ---
     let finalTranscription = "";
     if (mode !== 'NOTES_ONLY') {
-        const segmentSizeMinutes = 20;
-        const totalSegments = Math.ceil(estimatedDurationMinutes / segmentSizeMinutes);
-        
+        const segmentMinutes = 7;
+        const overlapSeconds = 30;
+        const totalSegments = Math.ceil(totalDurationSeconds / (segmentMinutes * 60));
+        let lastSnippet = ""; // Used to anchor the next chunk
+
         for (let s = 0; s < totalSegments; s++) {
-            const startMin = s * segmentSizeMinutes;
-            const endMin = Math.min((s + 1) * segmentSizeMinutes, estimatedDurationMinutes);
+            const startSec = Math.max(0, s * segmentMinutes * 60 - (s > 0 ? overlapSeconds : 0));
+            const endSec = Math.min((s + 1) * segmentMinutes * 60, totalDurationSeconds);
             
-            // Per-segment retry wrapper to "keep listening"
+            const startFmt = formatSeconds(startSec);
+            const endFmt = formatSeconds(endSec);
+            
+            await updateStatus(`Step 3/3: Transcribing part ${s + 1}/${totalSegments} (${startFmt} - ${endFmt}).`);
+            
+            let segmentPrompt = `Transcribe the audio verbatim from ${startFmt} to ${endFmt}. 
+            Output ONLY the raw transcription text. No headers, no commentary.`;
+            
+            if (s > 0 && lastSnippet) {
+                segmentPrompt += `\n\nCONTINUITY CONTEXT: The previous part ended with: "...${lastSnippet}". 
+                Pick up exactly where that left off and continue the transcription.`;
+            }
+
             try {
-                const segmentPrompt = `Transcribe verbatim: ${startMin}-${endMin} minutes. RAW TEXT ONLY. NO COMMENTARY.`;
                 const segmentText = await callGeminiWithRetry(fileUri, mimeType, "SEGMENT", model, encodedKey, segmentPrompt);
-                finalTranscription += (s > 0 ? "\n\n" : "") + segmentText.trim();
+                const trimmedText = segmentText.trim();
+                
+                finalTranscription += (s > 0 ? "\n\n" : "") + trimmedText;
+                
+                // Keep the last ~20 words as snippet for next loop
+                const words = trimmedText.split(/\s+/);
+                lastSnippet = words.slice(-20).join(" ");
             } catch (segErr) {
-                console.error(`Segment ${s} failed after retries:`, segErr);
-                finalTranscription += (s > 0 ? "\n\n" : "") + `[Segment ${startMin}-${endMin}m: Transcription unavailable due to processing error]`;
+                console.error(`Segment ${s} failed:`, segErr);
+                finalTranscription += (s > 0 ? "\n\n" : "") + `[Part ${s+1} (${startFmt}-${endFmt}) temporarily unavailable due to processing error]`;
             }
         }
     }
@@ -199,6 +211,12 @@ function extractJson(text: string): any {
     }
 }
 
+function formatSeconds(s: number): string {
+    const mins = Math.floor(s / 60);
+    const secs = Math.floor(s % 60);
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+}
+
 async function callGeminiWithRetry(fileUri: string, mimeType: string, mode: string, model: string, encodedKey: string, customPrompt?: string, retries = 3): Promise<string> {
     for (let i = 0; i <= retries; i++) {
         try {
@@ -206,7 +224,7 @@ async function callGeminiWithRetry(fileUri: string, mimeType: string, mode: stri
         } catch (e) {
             if (i === retries) throw e;
             console.log(`Retry ${i+1}/${retries} after error:`, e);
-            await new Promise(r => setTimeout(r, 3000 * (i + 1)));
+            await new Promise(r => setTimeout(r, 4000 * (i + 1)));
         }
     }
     throw new Error("Unexpected retry failure");
@@ -221,14 +239,14 @@ async function callGemini(fileUri: string, mimeType: string, mode: string, model
     2. Provide the summary, conclusions, and actionItems in that EXACT SAME language.
     3. Do NOT translate into English unless the audio itself is in English.
     
-    Transcription must be strictly verbatim.`;
+    Transcription must be strictly verbatim. Do not omit any spoken words. Do not summarize in the transcription part.`;
 
     let taskInstruction = "";
     let responseMimeType = "text/plain";
 
     if (mode === 'NOTES_ONLY') {
         responseMimeType = "application/json";
-        taskInstruction = `Create structured meeting notes. 
+        taskInstruction = `Analyze the meeting and provide notes. 
         MANDATORY: Return a raw JSON object with keys: "summary" (string), "conclusions" (array of strings), "actionItems" (array of strings).
         All values must be in the detected audio language.`;
     } else {

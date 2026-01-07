@@ -2,25 +2,36 @@
 import { MeetingData, ProcessingMode, GeminiModel } from '../types';
 
 /**
- * Robustly extracts the JSON block from a string that might contain other text.
+ * Robustly extracts the JSON block from a string. 
+ * Strips markdown code blocks and leading/trailing chatter.
  */
 function extractJson(text: string): any {
-    const start = text.indexOf('{');
-    const end = text.lastIndexOf('}');
+    // Look for markdown code blocks first
+    const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    const contentToParse = codeBlockMatch ? codeBlockMatch[1] : text;
+
+    const start = contentToParse.indexOf('{');
+    const end = contentToParse.lastIndexOf('}');
+    
     if (start === -1 || end === -1 || end < start) return null;
     
-    const jsonStr = text.substring(start, end + 1);
+    const jsonStr = contentToParse.substring(start, end + 1);
     try {
         return JSON.parse(jsonStr);
     } catch (e) {
         console.error("Failed to parse extracted JSON block:", e);
-        return null;
+        // Fallback: try to clean common AI mistakes like trailing commas before closing braces
+        try {
+            const cleaned = jsonStr.replace(/,\s*([\]}])/g, '$1');
+            return JSON.parse(cleaned);
+        } catch (e2) {
+            return null;
+        }
     }
 }
 
 /**
  * Recursively flattens an object or array to ensure only strings are returned.
- * Looks for common keys like 'text', 'task', etc.
  */
 function smartUnwrap(item: any): string {
     if (typeof item === 'string') return item;
@@ -31,12 +42,12 @@ function smartUnwrap(item: any): string {
     }
 
     if (typeof item === 'object') {
-        // Try to find a logical text property
-        const textKeys = ['text', 'task', 'point', 'note', 'description', 'content', 'value'];
+        const textKeys = ['text', 'task', 'point', 'note', 'description', 'content', 'value', 'summary'];
         for (const key of textKeys) {
-            if (item[key] && typeof item[key] === 'string') return item[key];
+            if (item[key] && (typeof item[key] === 'string' || typeof item[key] === 'number')) {
+                return String(item[key]);
+            }
         }
-        // If it's a nested object but has no obvious text, stringify it
         return JSON.stringify(item);
     }
     
@@ -45,7 +56,7 @@ function smartUnwrap(item: any): string {
 
 function sanitizeArray(arr: any): string[] {
     if (!Array.isArray(arr)) return [];
-    return arr.map(item => smartUnwrap(item)).filter(s => s !== '');
+    return arr.map(item => smartUnwrap(item)).filter(s => s.trim() !== '');
 }
 
 export const processMeetingAudio = async (
@@ -101,7 +112,7 @@ export const processMeetingAudio = async (
     let attempts = 0;
     let lastKnownLog = "";
 
-    while (attempts < 1200) { 
+    while (attempts < 1800) { // 2 hours timeout for long sessions
         attempts++;
         await new Promise(r => setTimeout(r, 4000));
         const pollResp = await fetch('/.netlify/functions/gemini', {
@@ -157,8 +168,8 @@ function parseResponse(jsonText: string, mode: ProcessingMode): MeetingData {
     if (!rawData) {
         console.error("Extraction failed for:", jsonText);
         return { 
-          transcription: "Error parsing result.", 
-          summary: "The AI response was malformed. Please check the audio length and try again.", 
+          transcription: "Error parsing result. Raw response was not a valid JSON structure.", 
+          summary: "The AI response was malformed. This can happen with very long or noisy recordings.", 
           conclusions: [], 
           actionItems: [] 
         };
