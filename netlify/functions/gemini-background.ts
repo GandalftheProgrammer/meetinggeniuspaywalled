@@ -10,11 +10,6 @@ const PROMPT_SUMMARY_AND_ACTIONS = `
 You are an expert meeting analyst. You are provided with the audio of a full meeting.
 Your task is to analyze the interaction and output structured notes.
 
-CRITICAL INSTRUCTION:
-You have a HUGE context window. 
-DO NOT SUMMARIZE BRIEFLY. BE EXTREMELY DETAILED.
-PROCESS THE ENTIRE AUDIO FILE FROM START TO FINISH.
-
 STRICT OUTPUT FORMAT RULES:
 1. Output MUST be in the native language of the speakers (headers must be in English).
 2. Do NOT use markdown bolding (double asterisks) in headers or lists.
@@ -22,16 +17,14 @@ STRICT OUTPUT FORMAT RULES:
 4. Use the following specific (English) headers to separate sections:
 
 [Summary]
-Provide a VERY EXTENSIVE, CHRONOLOGICAL summary of the discussion. 
-- Capture all main topics, nuances, and arguments.
-- Do not leave out details for brevity.
+Provide a summary by describing the relevant things that were discussed.
 
 [Conclusions & Insights]
-List ALL key conclusions and insights.
+List the key conclusions and insights.
 - Conclusion/insight 1
 
 [Action Points]
-List ALL agreed action items.
+List of agreed action items.
 - [ ] Person: Task description
 
 DO NOT output a transcription in this step. ONLY the notes.
@@ -49,13 +42,6 @@ CRITICAL RULES:
 `;
 
 // ==================================================================================
-// 📏 TOKEN DEFINITIONS
-// ==================================================================================
-const MAX_OUTPUT_TOKENS = 8192;   // Strict Limit for Gemini Flash/Pro Output
-
-// Thinking Budget Strategy:
-// Summary: We allocate 6000 tokens for thinking.
-const SUMMARY_THINKING_BUDGET = 6000; 
 
 export default async (req: Request) => {
   if (req.method !== 'POST') return new Response("OK");
@@ -65,12 +51,6 @@ export default async (req: Request) => {
   if (!apiKey) return;
 
   const encodedKey = encodeURIComponent(apiKey);
-  
-  // Execution Logbook (Local to this function run)
-  const executionLogs: any[] = [];
-  const logTechnical = (step: string, action: string, detail: any) => {
-      executionLogs.push({ step, action, detail, timestamp: new Date().toISOString() });
-  };
   
   try {
     const payload = await req.json();
@@ -85,13 +65,7 @@ export default async (req: Request) => {
 
     // --- HELPER: LOCAL STATE MANAGEMENT ---
     const updateState = async (updater: (s: any) => void) => {
-        const state = await resultStore.get(resultKey, { type: "json" }) as any || { events: [], status: 'PROCESSING', executionLogs: [] };
-        // Merge local execution logs into state
-        if (executionLogs.length > 0) {
-             state.executionLogs = [...(state.executionLogs || []), ...executionLogs];
-             // Clear local buffer so we don't duplicate if we update state multiple times
-             executionLogs.length = 0; 
-        }
+        const state = await resultStore.get(resultKey, { type: "json" }) as any || { events: [], status: 'PROCESSING' };
         updater(state);
         await resultStore.setJSON(resultKey, state);
     };
@@ -118,47 +92,6 @@ export default async (req: Request) => {
         return buffer;
     };
 
-    // --- HELPER: WRAPPED GOOGLE UPLOAD ---
-    const wrappedUpload = async (buffer: Buffer, displayName: string) => {
-        const start = Date.now();
-        const uri = await uploadToGoogle(buffer, displayName, mimeType, encodedKey);
-        const duration = Date.now() - start;
-        
-        // Extract Extension from mimeType for logging
-        const ext = mimeType.split('/')[1] || 'bin';
-        
-        logTechnical('Upload', displayName, { 
-            uri, 
-            sizeBytes: buffer.length, 
-            durationMs: duration,
-            fileType: ext
-        });
-        return uri;
-    };
-
-    // --- HELPER: WRAPPED GEMINI CALL ---
-    const wrappedGeminiCall = async (fileUris: string[], prompt: string, context: string, thinkingBudget?: number) => {
-        const start = Date.now();
-        
-        const res = await callGeminiWithFiles(fileUris, mimeType, model, encodedKey, prompt, MAX_OUTPUT_TOKENS, thinkingBudget);
-        const duration = Date.now() - start;
-        
-        logTechnical('Gemini', context, {
-            files: fileUris,
-            model,
-            tokenLimits: {
-                maxOutput: MAX_OUTPUT_TOKENS,
-                thinkingBudget: thinkingBudget ?? 'NONE'
-            },
-            promptLen: prompt.length,
-            durationMs: duration,
-            finishReason: res.finishReason,
-            inputTokens: res.usageMetadata.promptTokenCount,
-            outputTokens: res.usageMetadata.candidatesTokenCount
-        });
-        return { ...res, duration };
-    };
-
     // --- TASK 1: FAST SUMMARY (Runs on Raw Audio) ---
     if (task === 'SUMMARY') {
         await pushEvent(14, 'processing', 'Analyzing...');
@@ -167,16 +100,19 @@ export default async (req: Request) => {
         const buffer = await assembleFile('raw');
 
         // 2. Upload to Google
-        const uri = await wrappedUpload(buffer, `Raw_${jobId}`);
+        const uri = await uploadToGoogle(buffer, `Raw_${jobId}`, mimeType, encodedKey);
         await waitForFileActive(uri, encodedKey);
 
         // 3. Generate Summary
-        const res = await wrappedGeminiCall(
+        const tStart = Date.now();
+        const res = await callGeminiWithFiles(
             [uri], 
-            PROMPT_SUMMARY_AND_ACTIONS,
-            'Summary Generation',
-            SUMMARY_THINKING_BUDGET // <--- 6000 Tokens for Thinking ONLY here
+            mimeType, 
+            model, 
+            encodedKey, 
+            PROMPT_SUMMARY_AND_ACTIONS
         );
+        const duration = Date.now() - tStart;
 
         // 4. Save Result
         await updateState((s) => {
@@ -189,7 +125,7 @@ export default async (req: Request) => {
                     input: res.usageMetadata.promptTokenCount, 
                     output: res.usageMetadata.candidatesTokenCount,
                     finishReason: res.finishReason,
-                    duration: res.duration
+                    duration: duration
                 }]
             };
             s.status = 'COMPLETED';
@@ -214,7 +150,7 @@ export default async (req: Request) => {
         
         for (const seg of segments) {
             const buffer = await assembleFile(seg.index);
-            const uri = await wrappedUpload(buffer, `Seg_${jobId}_${seg.index}`);
+            const uri = await uploadToGoogle(buffer, `Seg_${jobId}_${seg.index}`, mimeType, encodedKey);
             fileUris.push(uri);
         }
         await pushEvent(11, 'completed');
@@ -230,15 +166,15 @@ export default async (req: Request) => {
         
         const tasks = fileUris.map(async (uri, idx) => {
             const prompt = `${PROMPT_VERBATIM_TRANSCRIPT}\n(Part ${idx+1})`;
-            // DO NOT PASS THINKING BUDGET FOR TRANSCRIPTS
-            // This ensures undefined is passed, and thinkingConfig is NOT added.
-            const res = await wrappedGeminiCall([uri], prompt, `Transcript Part ${idx+1}`);
+            const tStart = Date.now();
+            const res = await callGeminiWithFiles([uri], mimeType, model, encodedKey, prompt);
+            const tEnd = Date.now();
             return { 
                 index: idx, 
                 text: res.text, 
                 usage: res.usageMetadata, 
                 finishReason: res.finishReason,
-                duration: res.duration
+                duration: tEnd - tStart
             };
         });
         
@@ -348,23 +284,10 @@ async function waitForFileActive(fileUri: string, encodedKey: string) {
     }
 }
 
-async function callGeminiWithFiles(fileUris: string[], mimeType: string, model: string, encodedKey: string, promptText: string, maxOutputTokens: number, thinkingBudget?: number) {
+async function callGeminiWithFiles(fileUris: string[], mimeType: string, model: string, encodedKey: string, promptText: string) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodedKey}`;
     const parts: any[] = fileUris.map(uri => ({ file_data: { file_uri: uri, mime_type: mimeType } }));
     parts.push({ text: promptText });
-
-    // STANDARD CONFIG ONLY
-    const config: any = { 
-        maxOutputTokens: maxOutputTokens, 
-        temperature: 0.2,
-        topP: 0.95, 
-        topK: 40    
-    };
-
-    // Apply Thinking Budget only if strictly provided
-    if (thinkingBudget !== undefined) {
-        config.thinkingConfig = { thinkingBudget: thinkingBudget };
-    }
 
     const resp = await fetch(url, {
         method: 'POST',
@@ -372,7 +295,7 @@ async function callGeminiWithFiles(fileUris: string[], mimeType: string, model: 
         body: JSON.stringify({
             contents: [{ parts }],
             system_instruction: { parts: [{ text: "You are a precise transcriber/analyst. Do not hallucinate." }] },
-            generationConfig: config
+            generationConfig: { maxOutputTokens: 8192, temperature: 0.2 }
         })
     });
 

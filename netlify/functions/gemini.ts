@@ -28,16 +28,12 @@ export default async (req: Request) => {
         const store = getStore({ name: "meeting-results", consistency: "strong" });
         
         // Fetch both potential states
-        const summaryState = await store.get(`${jobId}_summary`, { type: "json" }) as any || { events: [], executionLogs: [] };
-        const transcriptState = await store.get(`${jobId}_transcript`, { type: "json" }) as any || { events: [], executionLogs: [] };
+        const summaryState = await store.get(`${jobId}_summary`, { type: "json" }) as any || { events: [] };
+        const transcriptState = await store.get(`${jobId}_transcript`, { type: "json" }) as any || { events: [] };
 
         // Aggregate Events (Sort by timestamp)
         const allEvents = [...(summaryState.events || []), ...(transcriptState.events || [])];
         allEvents.sort((a, b) => a.timestamp - b.timestamp);
-        
-        // Aggregate Execution Logs
-        const allLogs = [...(summaryState.executionLogs || []), ...(transcriptState.executionLogs || [])];
-        allLogs.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
         // Determine Aggregate Status
         let overallStatus = 'PROCESSING';
@@ -81,7 +77,6 @@ export default async (req: Request) => {
         const responseData = {
             status: overallStatus,
             events: allEvents,
-            executionLogs: allLogs,
             result: resultText,
             usage: {
                 totalInputTokens: totalInput,
