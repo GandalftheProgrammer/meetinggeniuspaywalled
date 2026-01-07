@@ -49,11 +49,20 @@ const App: React.FC = () => {
   const [pipelineSteps, setPipelineSteps] = useState<PipelineStep[]>(INITIAL_PIPELINE_STEPS);
 
   const updatePipelineStep = (update: PipelineUpdate) => {
-      setPipelineSteps(prev => prev.map(step => 
-          step.id === update.stepId 
-            ? { ...step, status: update.status, detail: update.detail || step.detail } 
-            : step
-      ));
+      setPipelineSteps(prev => prev.map(step => {
+          // If we are updating a specific step, update it
+          if (step.id === update.stepId) {
+             return { ...step, status: update.status, detail: update.detail || step.detail };
+          }
+          // Catch-up Logic:
+          // If the incoming update says step X is processing/completed,
+          // imply that all steps BEFORE X are completed (if they aren't already marked completed).
+          // This fixes "missed" polls where a step finished too fast to be seen.
+          if (step.id < update.stepId && step.status !== 'completed' && update.status !== 'error') {
+             return { ...step, status: 'completed' };
+          }
+          return step;
+      }));
   };
 
   const addLog = (msg: string) => { console.log(msg); }; // Legacy compatibility shim

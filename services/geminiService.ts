@@ -4,7 +4,6 @@ import { MeetingData, ProcessingMode, GeminiModel, PipelineStep, PipelineUpdate 
 const SEGMENT_DURATION_SECONDS = 1800; // 30 minutes
 const TARGET_SAMPLE_RATE = 16000; // 16kHz Mono
 
-// Initialize the 18-step pipeline
 export const INITIAL_PIPELINE_STEPS: PipelineStep[] = [
     { id: 1, label: "Input Received", status: 'pending', detail: "Memory Check" },
     { id: 2, label: "Secure Drive Backup", status: 'pending' },
@@ -26,16 +25,48 @@ export const INITIAL_PIPELINE_STEPS: PipelineStep[] = [
     { id: 18, label: "Sync", status: 'pending' }
 ];
 
+// --- HIGH RES LOGGER ---
+const log = (stepId: number, title: string, data?: any) => {
+    const time = new Date().toISOString().split('T')[1].slice(0, -1); // HH:mm:ss.SSS
+    const stepLabel = `STEP ${stepId.toString().padStart(2, '0')}`;
+    
+    // CSS styling for Chrome DevTools
+    console.groupCollapsed(`%c${stepLabel}%c ${title} %c@ ${time}`, 
+        'background: #2563eb; color: white; padding: 2px 6px; border-radius: 4px; font-weight: bold;',
+        'color: #1e293b; font-weight: bold;',
+        'color: #94a3b8; font-family: monospace;'
+    );
+    
+    if (data) {
+        if (typeof data === 'object') {
+            console.table(data); // Using table for arrays/objects is cleaner
+        } else {
+            console.log(data);
+        }
+    }
+    console.groupEnd();
+};
+
 async function sliceAudioIntoSegments(blob: Blob): Promise<Blob[]> {
+    const startT = performance.now();
+    log(4, "Starting Audio Decoding & Resampling", { inputSize: blob.size, inputType: blob.type });
+
     const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
     const arrayBuffer = await blob.arrayBuffer();
     const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
     
+    log(4, "Decoded Raw Audio Info", { 
+        duration: audioBuffer.duration.toFixed(2) + 's', 
+        channels: audioBuffer.numberOfChannels, 
+        originalSampleRate: audioBuffer.sampleRate 
+    });
+
     const segments: Blob[] = [];
     const totalDuration = audioBuffer.duration;
     const numSegments = Math.ceil(totalDuration / SEGMENT_DURATION_SECONDS);
 
     for (let i = 0; i < numSegments; i++) {
+        const segStart = performance.now();
         const startOffset = i * SEGMENT_DURATION_SECONDS;
         const endOffset = Math.min((i + 1) * SEGMENT_DURATION_SECONDS, totalDuration);
         const duration = endOffset - startOffset;
@@ -47,10 +78,24 @@ async function sliceAudioIntoSegments(blob: Blob): Promise<Blob[]> {
         source.start(0, startOffset, duration);
         
         const renderedBuffer = await offlineCtx.startRendering();
-        segments.push(audioBufferToWav(renderedBuffer));
+        const wavBlob = audioBufferToWav(renderedBuffer);
+        segments.push(wavBlob);
+        
+        const segEnd = performance.now();
+        log(5, `Segment ${i+1}/${numSegments} Created`, { 
+            processingTimeMs: (segEnd - segStart).toFixed(0),
+            startOffset: startOffset.toFixed(1) + 's', 
+            duration: duration.toFixed(1) + 's',
+            sizeBytes: wavBlob.size,
+            targetSampleRate: TARGET_SAMPLE_RATE
+        });
     }
     
     await audioCtx.close();
+    
+    const endT = performance.now();
+    log(5, "Segmentation Complete", { totalSegments: segments.length, totalProcessingTimeMs: (endT - startT).toFixed(0) });
+    
     return segments;
 }
 
@@ -108,39 +153,52 @@ export const processMeetingAudio = async (
   };
 
   try {
-    // Phase 2: Client Preparation
-    // Note: Steps 1 & 2 are handled in App.tsx before this function is called
-    
+    // --- STEP 3: ANALYSIS ---
     setStep(3, 'processing', `${(audioBlob.size / 1024 / 1024).toFixed(2)} MB`);
-    await new Promise(r => setTimeout(r, 600)); // Minimal delay for UX so user sees the step
+    log(3, "Audio Analysis Started", { blobSize: audioBlob.size, blobType: audioBlob.type });
+    await new Promise(r => setTimeout(r, 600)); 
     setStep(3, 'completed');
 
+    // --- STEP 4: OPTIMIZATION (Resampling) ---
     setStep(4, 'processing', 'Resampling...');
     const physicalSegments = await sliceAudioIntoSegments(audioBlob);
     setStep(4, 'completed', '16kHz Mono');
 
+    // --- STEP 5: SEGMENTATION ---
     setStep(5, 'processing');
     const segmentManifest: {index: number, size: number}[] = [];
+    await new Promise(r => setTimeout(r, 300));
     setStep(5, 'completed', `${physicalSegments.length} slice(s)`);
 
+    // --- STEP 6: ENCRYPTION & STAGING ---
     setStep(6, 'processing', 'Chunking...');
+    log(6, "Encryption & Staging", { note: "Preparing chunks for secure upload" });
     await new Promise(r => setTimeout(r, 400));
     setStep(6, 'completed');
 
     const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+    log(6, "Job Created", { jobId });
 
-    // Phase 3: Transport
-    setStep(7, 'processing', 'Connecting...');
+    // --- STEP 7: CLOUD HANDSHAKE ---
+    setStep(7, 'processing', 'Handshake...');
+    log(7, "Cloud Handshake", { endpoint: "/.netlify/functions/gemini" });
+    await new Promise(r => setTimeout(r, 500));
+    setStep(7, 'completed'); 
+
+    // --- STEP 8: SECURE UPLOAD ---
+    const totalSegments = physicalSegments.length;
+    const CHUNK_SIZE = 4 * 1024 * 1024;
     
-    for (let i = 0; i < physicalSegments.length; i++) {
+    for (let i = 0; i < totalSegments; i++) {
         const segmentBlob = physicalSegments[i];
         const totalBytes = segmentBlob.size;
-        const CHUNK_SIZE = 4 * 1024 * 1024;
         const totalChunks = Math.ceil(totalBytes / CHUNK_SIZE);
         
-        setStep(8, 'processing', `Uploading seg ${i+1}/${physicalSegments.length}`);
+        setStep(8, 'processing', `Uploading seg ${i+1}/${totalSegments}`);
+        log(8, `Uploading Segment ${i}`, { totalBytes, totalChunks });
         
         for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
+            const chunkStart = performance.now();
             const start = chunkIdx * CHUNK_SIZE;
             const end = Math.min(start + CHUNK_SIZE, totalBytes);
             const chunk = segmentBlob.slice(start, end);
@@ -158,13 +216,20 @@ export const processMeetingAudio = async (
                 })
             });
             if (!up.ok) throw new Error(`Upload failed for segment ${i} chunk ${chunkIdx}`);
+            const chunkEnd = performance.now();
+            
+            log(8, `Chunk ${chunkIdx}/${totalChunks} Uploaded`, { 
+                size: chunk.size, 
+                durationMs: (chunkEnd - chunkStart).toFixed(0),
+                status: up.status
+            });
         }
         segmentManifest.push({ index: i, size: totalBytes });
     }
-    setStep(7, 'completed');
     setStep(8, 'completed');
 
-    // Trigger Background
+    // --- TRIGGER BACKGROUND ---
+    log(9, "Triggering Server Background Process", { model, mode, segmentCount: segmentManifest.length });
     const triggerResp = await fetch('/.netlify/functions/gemini-background', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -179,8 +244,11 @@ export const processMeetingAudio = async (
     });
     if (!triggerResp.ok) throw new Error("Could not start background process.");
 
-    // Poll for status
+    // --- POLLING LOOP ---
+    log(10, "Entered Polling Loop", { intervalMs: 3000 });
     let attempts = 0;
+    let lastRemoteStep = 9;
+
     while (attempts < 1200) {
         attempts++;
         await new Promise(r => setTimeout(r, 3000));
@@ -193,23 +261,34 @@ export const processMeetingAudio = async (
         if (poll.ok) {
             const data = await poll.json();
             
-            // Handle remote step updates from backend
+            // Sync Remote Steps
             if (data.currentStepId && data.currentStepStatus) {
+                // If step changed, log it to console
+                if (data.currentStepId !== lastRemoteStep || data.currentStepStatus === 'completed') {
+                    log(data.currentStepId, `Remote Status: ${data.currentStepStatus}`, { 
+                        detail: data.currentStepDetail,
+                        serverMetadata: data.metadata 
+                    });
+                    lastRemoteStep = data.currentStepId;
+                }
                 setStep(data.currentStepId, data.currentStepStatus, data.currentStepDetail);
             }
 
             if (data.status === 'COMPLETED') {
-                 // Ensure all final steps are marked completed for UI consistency
+                 log(18, "Process Completed", { resultLength: data.result.length });
+                 // Force complete all steps to ensure 100% green UI at the end
                  for (let s = 9; s <= 18; s++) setStep(s, 'completed');
                  return extractContent(data.result);
             }
-            if (data.status === 'ERROR') throw new Error(data.error);
+            if (data.status === 'ERROR') {
+                log(lastRemoteStep, "Remote Error", { error: data.error });
+                throw new Error(data.error);
+            }
         }
     }
     throw new Error("Analysis timed out.");
   } catch (error) {
-    // If error occurs, find the last active step and mark it as error
-    // In a real app we'd track current step in a var, but for now we just throw
+    log(99, "Critical Pipeline Failure", error);
     throw error;
   }
 };

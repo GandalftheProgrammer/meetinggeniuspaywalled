@@ -13,15 +13,16 @@ Your task is to analyze the COMPLETE interaction across all audio files and outp
 STRICT OUTPUT FORMAT RULES:
 1. Output MUST be in the native language of the speakers.
 2. Do NOT use markdown bolding (double asterisks) in headers or lists. Keep text clean.
-3. Use the following specific tags to separate sections:
+3. Do NOT make interpretations yourself, stick with interpretations/insights/agreements made by the speakers
+4. Use the following specific tags to separate sections:
 
 [SUMMARY]
-Provide a summary by describing core topics, debates, and insights. Focus on the content, not on the personal chit chat (unless relevant).
+Provide a summary by describing the relevant things that were discussed. Focus on the content, not on the personal chit chat (unless relevant).
 
-[CONCLUSIONS]
-List the key decisions and agreements made.
-- Conclusion 1
-- Conclusion 2
+[CONCLUSIONS & INSIGHTS]
+List the key conclusions and insights.
+- Conclusion/insight 1
+- Conclusion/insight 2
 
 [ACTIONS]
 List of agreed action items.
@@ -53,18 +54,24 @@ export default async (req: Request) => {
   const encodedKey = encodeURIComponent(apiKey);
   let jobId: string = "";
 
+  // Server logger helper
+  const sLog = (step: number, msg: string, meta?: any) => {
+     console.log(`[JOB:${jobId}] [STEP ${step}] ${msg}`, meta ? JSON.stringify(meta) : '');
+  };
+
   try {
     const payload = await req.json();
     const { segments, mimeType, mode, model } = payload;
     jobId = payload.jobId;
     if (!jobId) return;
 
+    sLog(9, "Background Process Started", { segmentCount: segments.length, model });
+
     const resultStore = getStore({ name: "meeting-results", consistency: "strong" });
     const uploadStore = getStore({ name: "meeting-uploads", consistency: "strong" });
 
     // Helper to update the UI Pipeline Step
     const setStep = async (stepId: number, status: string, detail: string = "") => {
-        console.log(`[Job ${jobId}] Step ${stepId}: ${status} (${detail})`); 
         const current = await resultStore.get(jobId, { type: "json" }) as any || { status: 'PROCESSING' };
         await resultStore.setJSON(jobId, { 
             ...current, 
@@ -89,6 +96,8 @@ export default async (req: Request) => {
         const segIdx = seg.index;
         const totalSize = seg.size;
         
+        sLog(11, `Initiating Upload for Segment ${segIdx}`, { size: totalSize });
+
         const handshakeUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodedKey}`;
         const initResp = await fetch(handshakeUrl, {
             method: 'POST',
@@ -123,6 +132,7 @@ export default async (req: Request) => {
             chunkIdx++;
 
             while (buffer.length >= CHUNK_SIZE) {
+                sLog(11, `Flushing Buffer`, { offset, chunkSize: CHUNK_SIZE });
                 const toSend = buffer.subarray(0, CHUNK_SIZE);
                 buffer = buffer.subarray(CHUNK_SIZE);
                 await fetch(uploadUrl, {
@@ -139,6 +149,7 @@ export default async (req: Request) => {
             }
         }
 
+        sLog(11, `Finalizing Segment ${segIdx}`, { finalSize: buffer.length });
         const finalResp = await fetch(uploadUrl, {
             method: 'POST',
             headers: {
@@ -150,6 +161,7 @@ export default async (req: Request) => {
             body: buffer
         });
         const fileResult = await finalResp.json();
+        sLog(11, `Segment ${segIdx} Uploaded`, { uri: fileResult.file?.uri });
         fileUris.push(fileResult.file?.uri || fileResult.uri);
     }
     
@@ -159,13 +171,14 @@ export default async (req: Request) => {
     // --- 3. VALIDATION ---
     await setStep(12, 'processing', 'Google Processing...');
     for (const uri of fileUris) {
+        sLog(12, `Waiting for file activation`, { uri });
         await waitForFileActive(uri, encodedKey);
     }
+    sLog(12, "All files active");
     await setStep(12, 'completed');
 
     // --- 4. EXECUTE AI TASKS ---
     await setStep(13, 'processing', 'Loading Context...');
-    // Small delay to let user see the step
     await new Promise(r => setTimeout(r, 800));
     await setStep(13, 'completed');
 
@@ -175,6 +188,8 @@ export default async (req: Request) => {
     if (mode !== 'TRANSCRIPT_ONLY') {
         await setStep(14, 'processing', 'Reasoning...');
         swarmTasks.push((async () => {
+            const tStart = Date.now();
+            sLog(14, "Starting Summary Task");
             const res = await callGeminiWithFiles(
                 fileUris, 
                 mimeType, 
@@ -182,6 +197,7 @@ export default async (req: Request) => {
                 encodedKey, 
                 PROMPT_SUMMARY_AND_ACTIONS
             );
+            sLog(14, "Summary Task Complete", { duration: Date.now() - tStart, outputLen: res.text.length });
             return { type: 'NOTES', data: res.text };
         })());
     } else {
@@ -193,6 +209,8 @@ export default async (req: Request) => {
         await setStep(15, 'processing', `Transcribing ${fileUris.length} segments...`);
         fileUris.forEach((uri, idx) => {
             swarmTasks.push((async () => {
+                const tStart = Date.now();
+                sLog(15, `Starting Transcript Task Seg ${idx}`);
                 const prompt = `${PROMPT_VERBATIM_TRANSCRIPT}\n(This is segment ${idx+1} of the meeting)`;
                 const res = await callGeminiWithFiles(
                     [uri],
@@ -201,6 +219,7 @@ export default async (req: Request) => {
                     encodedKey, 
                     prompt
                 );
+                sLog(15, `Transcript Task Seg ${idx} Complete`, { duration: Date.now() - tStart, outputLen: res.text.length });
                 return { type: 'TRANSCRIPT', index: idx, data: res.text };
             })());
         });
@@ -226,6 +245,7 @@ export default async (req: Request) => {
 
     await setStep(17, 'processing');
     const resultText = `${finalNotes}\n\n[TRANSCRIPTION]\n${finalTranscript}`;
+    sLog(17, "Final Result Assembled", { totalLength: resultText.length });
     await setStep(17, 'completed');
 
     await setStep(18, 'processing', 'Saving...');
@@ -233,7 +253,7 @@ export default async (req: Request) => {
         status: 'COMPLETED', 
         result: resultText
     });
-    // The client will handle marking step 18 complete
+    sLog(18, "Job Completed Successfully");
 
   } catch (err: any) {
     console.error(`[Background Error] ${err.message}`);
