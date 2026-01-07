@@ -104,66 +104,71 @@ export default async (req: Request) => {
     const fileMetadata = await waitForFileActive(fileUri, encodedKey);
     const durationStr = fileMetadata.videoMetadata?.duration || "0s";
     const totalDurationSeconds = parseFloat(durationStr.replace('s', '')) || (fileSize / 16000);
-    const totalMinutes = Math.ceil(totalDurationSeconds / 60);
 
-    // --- 2. NOTES GENERATION (Step 2/3) ---
-    await updateStatus("Step 2/3: Analyzing meeting insights & summary.");
+    // --- PARALLEL PROCESSING ---
+    await updateStatus("Step 2/3: Launching parallel analysis swarm...");
+
+    const segmentMinutes = 7;
+    const overlapSeconds = 15;
+    const totalSegments = Math.ceil(totalDurationSeconds / (segmentMinutes * 60));
     
-    let summaryData: any = { summary: "", conclusions: [], actionItems: [] };
+    // Create segment tasks
+    const tasks: Promise<any>[] = [];
+
+    // Task for summary/notes
     if (mode !== 'TRANSCRIPT_ONLY') {
-        const notesJsonRaw = await callGeminiWithRetry(fileUri, mimeType, "NOTES_ONLY", model, encodedKey);
-        const parsed = extractJson(notesJsonRaw);
-        if (parsed) {
-            summaryData = parsed;
-        } else {
-            summaryData.summary = "Deep analysis complete. See the full transcript for more details.";
-        }
+        tasks.push((async () => {
+            await updateStatus("Swarm: Summary generator active...");
+            const raw = await callGeminiWithRetry(fileUri, mimeType, "NOTES_ONLY", model, encodedKey);
+            return { type: 'NOTES', data: raw };
+        })());
     }
 
-    // --- 3. TRANSCRIPTION (Step 3/3) ---
-    let finalTranscription = "";
+    // Swarm tasks for transcription
     if (mode !== 'NOTES_ONLY') {
-        const segmentMinutes = 7;
-        const overlapSeconds = 30;
-        const totalSegments = Math.ceil(totalDurationSeconds / (segmentMinutes * 60));
-        let lastSnippet = ""; // Used to anchor the next chunk
-
         for (let s = 0; s < totalSegments; s++) {
             const startSec = Math.max(0, s * segmentMinutes * 60 - (s > 0 ? overlapSeconds : 0));
             const endSec = Math.min((s + 1) * segmentMinutes * 60, totalDurationSeconds);
-            
             const startFmt = formatSeconds(startSec);
             const endFmt = formatSeconds(endSec);
-            
-            await updateStatus(`Step 3/3: Transcribing part ${s + 1}/${totalSegments} (${startFmt} - ${endFmt}).`);
-            
-            let segmentPrompt = `Transcribe the audio verbatim from ${startFmt} to ${endFmt}. 
-            Output ONLY the raw transcription text. No headers, no commentary.`;
-            
-            if (s > 0 && lastSnippet) {
-                segmentPrompt += `\n\nCONTINUITY CONTEXT: The previous part ended with: "...${lastSnippet}". 
-                Pick up exactly where that left off and continue the transcription.`;
-            }
 
-            try {
-                const segmentText = await callGeminiWithRetry(fileUri, mimeType, "SEGMENT", model, encodedKey, segmentPrompt);
-                const trimmedText = segmentText.trim();
-                
-                finalTranscription += (s > 0 ? "\n\n" : "") + trimmedText;
-                
-                // Keep the last ~20 words as snippet for next loop
-                const words = trimmedText.split(/\s+/);
-                lastSnippet = words.slice(-20).join(" ");
-            } catch (segErr) {
-                console.error(`Segment ${s} failed:`, segErr);
-                finalTranscription += (s > 0 ? "\n\n" : "") + `[Part ${s+1} (${startFmt}-${endFmt}) temporarily unavailable due to processing error]`;
-            }
+            tasks.push((async () => {
+                await updateStatus(`Swarm: Transcribing part ${s + 1}/${totalSegments} (${startFmt}-${endFmt})...`);
+                const prompt = `Transcribe verbatim from ${startFmt} to ${endFmt}. Output ONLY raw text.`;
+                const raw = await callGeminiWithRetry(fileUri, mimeType, "SEGMENT", model, encodedKey, prompt);
+                return { type: 'TRANSCRIPT', index: s, data: raw };
+            })());
+        }
+    }
+
+    const swarmResults = await Promise.all(tasks);
+    await updateStatus("Step 3/3: Stitching swarm results together.");
+
+    let finalTranscription = "";
+    let summaryData: any = { summary: "", conclusions: [], actionItems: [] };
+
+    // Separate results
+    const transcriptParts = swarmResults.filter(r => r.type === 'TRANSCRIPT').sort((a, b) => a.index - b.index);
+    const notesResult = swarmResults.find(r => r.type === 'NOTES');
+
+    // Stitch transcripts
+    finalTranscription = transcriptParts.map(p => p.data.trim()).join("\n\n");
+
+    // Hammer Unwrapping for Notes
+    if (notesResult) {
+        const text = notesResult.data;
+        const parsed = extractJson(text);
+        if (parsed) {
+            summaryData = parsed;
+        } else {
+            // Heuristic fallback if JSON fails
+            summaryData = heuristicExtract(text);
         }
     }
 
     const finalResult = {
-        transcription: finalTranscription,
-        summary: summaryData.summary || "",
+        transcription: finalTranscription || "No transcription available.",
+        summary: summaryData.summary || "Summary generation completed.",
         conclusions: summaryData.conclusions || [],
         actionItems: summaryData.actionItems || []
     };
@@ -185,6 +190,37 @@ export default async (req: Request) => {
   }
 };
 
+/**
+ * The Hammer: Heuristically extract sections from a messy text block if JSON fails.
+ */
+function heuristicExtract(text: string): any {
+    const data = { summary: '', conclusions: [] as string[], actionItems: [] as string[] };
+    
+    const findPart = (pattern: RegExp) => {
+        const match = text.match(pattern);
+        return match ? match[1].trim() : null;
+    };
+
+    // Try to find sections based on common headers
+    data.summary = findPart(/Summary[:\s]*([\s\S]*?)(?=Conclusion|Action|Key Points|$)/i) || 
+                   findPart(/Samenvatting[:\s]*([\s\S]*?)(?=Conclusie|Actie|Belangrijk|$)/i) || 
+                   text.substring(0, 500);
+
+    const conMatch = findPart(/Conclusions?[:\s]*([\s\S]*?)(?=Action|Summary|Key Points|$)/i) ||
+                     findPart(/Conclusies?[:\s]*([\s\S]*?)(?=Actie|Samenvatting|Belangrijk|$)/i);
+    if (conMatch) {
+        data.conclusions = conMatch.split(/\n-|\n\*|\n\d\./).map(s => s.trim()).filter(s => s.length > 5);
+    }
+
+    const actMatch = findPart(/Action Items?[:\s]*([\s\S]*?)(?=Conclusion|Summary|Key Points|$)/i) ||
+                     findPart(/Actiepunten?[:\s]*([\s\S]*?)(?=Conclusie|Samenvatting|Belangrijk|$)/i);
+    if (actMatch) {
+        data.actionItems = actMatch.split(/\n-|\n\*|\n\d\./).map(s => s.trim()).filter(s => s.length > 5);
+    }
+
+    return data;
+}
+
 async function waitForFileActive(fileUri: string, encodedKey: string): Promise<any> {
     const pollUrl = `${fileUri}?key=${encodedKey}`;
     for (let i = 0; i < 60; i++) {
@@ -205,7 +241,7 @@ function extractJson(text: string): any {
     const end = text.lastIndexOf('}');
     if (start === -1 || end === -1) return null;
     try {
-        return JSON.parse(text.substring(start, end + 1));
+        return JSON.parse(text.substring(start, end + 1).replace(/,\s*([\]}])/g, '$1'));
     } catch (e) {
         return null;
     }
@@ -224,7 +260,7 @@ async function callGeminiWithRetry(fileUri: string, mimeType: string, mode: stri
         } catch (e) {
             if (i === retries) throw e;
             console.log(`Retry ${i+1}/${retries} after error:`, e);
-            await new Promise(r => setTimeout(r, 4000 * (i + 1)));
+            await new Promise(r => setTimeout(r, 5000 * (i + 1)));
         }
     }
     throw new Error("Unexpected retry failure");
@@ -233,24 +269,20 @@ async function callGeminiWithRetry(fileUri: string, mimeType: string, mode: stri
 async function callGemini(fileUri: string, mimeType: string, mode: string, model: string, encodedKey: string, customPrompt?: string): Promise<string> {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodedKey}`;
 
-    const systemInstruction = `You are a professional meeting minutes specialist.
-    MANDATORY LANGUAGE RULE: 
-    1. Identify the primary spoken language in the audio.
-    2. Provide the summary, conclusions, and actionItems in that EXACT SAME language.
-    3. Do NOT translate into English unless the audio itself is in English.
-    
-    Transcription must be strictly verbatim. Do not omit any spoken words. Do not summarize in the transcription part.`;
+    const systemInstruction = `You are a world-class meeting specialist. 
+    Linguistic Rule: Use the same language as the spoken audio.
+    Formatting: Be robust and clear. If JSON is requested, strictly provide valid JSON. 
+    If transcription is requested, be 100% verbatim.`;
 
     let taskInstruction = "";
     let responseMimeType = "text/plain";
 
     if (mode === 'NOTES_ONLY') {
         responseMimeType = "application/json";
-        taskInstruction = `Analyze the meeting and provide notes. 
-        MANDATORY: Return a raw JSON object with keys: "summary" (string), "conclusions" (array of strings), "actionItems" (array of strings).
-        All values must be in the detected audio language.`;
+        taskInstruction = `Return ONLY a raw JSON object: {"summary": "string", "conclusions": ["string"], "actionItems": ["string"]}. 
+        Language must match the audio.`;
     } else {
-        taskInstruction = customPrompt || "Transcribe the audio verbatim.";
+        taskInstruction = customPrompt || "Transcribe verbatim.";
     }
 
     const payload = {
@@ -273,7 +305,7 @@ async function callGemini(fileUri: string, mimeType: string, mode: string, model
         body: JSON.stringify(payload)
     });
 
-    if (!resp.ok) throw new Error(`Gemini Call Failed (${resp.status}): ${await resp.text()}`);
+    if (!resp.ok) throw new Error(`Gemini Call Failed (${resp.status})`);
     const data = await resp.json();
     return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
 }

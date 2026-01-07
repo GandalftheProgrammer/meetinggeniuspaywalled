@@ -2,32 +2,75 @@
 import { MeetingData, ProcessingMode, GeminiModel } from '../types';
 
 /**
- * Robustly extracts the JSON block from a string. 
- * Strips markdown code blocks and leading/trailing chatter.
+ * Robustly extracts the JSON block or relevant content from a string. 
  */
 function extractJson(text: string): any {
-    // Look for markdown code blocks first
-    const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-    const contentToParse = codeBlockMatch ? codeBlockMatch[1] : text;
+    if (!text) return null;
 
-    const start = contentToParse.indexOf('{');
-    const end = contentToParse.lastIndexOf('}');
-    
-    if (start === -1 || end === -1 || end < start) return null;
-    
-    const jsonStr = contentToParse.substring(start, end + 1);
+    // 1. Try direct JSON parse
     try {
-        return JSON.parse(jsonStr);
-    } catch (e) {
-        console.error("Failed to parse extracted JSON block:", e);
-        // Fallback: try to clean common AI mistakes like trailing commas before closing braces
+        return JSON.parse(text);
+    } catch (e) {}
+
+    // 2. Look for markdown code blocks
+    const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    if (codeBlockMatch) {
         try {
-            const cleaned = jsonStr.replace(/,\s*([\]}])/g, '$1');
-            return JSON.parse(cleaned);
-        } catch (e2) {
-            return null;
-        }
+            return JSON.parse(codeBlockMatch[1]);
+        } catch (e) {}
     }
+
+    // 3. Find first { and last }
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start !== -1 && end !== -1 && end > start) {
+        const potentialJson = text.substring(start, end + 1);
+        try {
+            return JSON.parse(potentialJson.replace(/,\s*([\]}])/g, '$1'));
+        } catch (e) {}
+    }
+
+    return null;
+}
+
+/**
+ * Heuristically extracts data if JSON is not present.
+ */
+function heuristicParse(text: string): MeetingData | null {
+    if (!text || text.length < 50) return null;
+
+    const sections = {
+        summary: '',
+        conclusions: [] as string[],
+        actionItems: [] as string[]
+    };
+
+    // Very rough heuristic parsing by looking for typical headers
+    const findSection = (headers: string[], content: string) => {
+        for (const header of headers) {
+            const regex = new RegExp(`${header}[:\\s]*([\\s\\S]*?)(?=\\n\\s*\\n|\\n#|\\n\\d\\.|Summary|Conclusion|Action|$)`, 'i');
+            const match = content.match(regex);
+            if (match && match[1].trim()) return match[1].trim();
+        }
+        return null;
+    };
+
+    sections.summary = findSection(['Summary', 'Samenvatting', 'Inleiding', 'Focus'], text) || '';
+    
+    const conclusionText = findSection(['Conclusions', 'Conclusies', 'Belangrijkste punten', 'Insights'], text);
+    if (conclusionText) {
+        sections.conclusions = conclusionText.split(/\n-|\n\*|\n\d\./).map(s => s.trim()).filter(s => s.length > 2);
+    }
+
+    const actionText = findSection(['Action Items', 'Actiepunten', 'Taken', 'Volgende stappen'], text);
+    if (actionText) {
+        sections.actionItems = actionText.split(/\n-|\n\*|\n\d\./).map(s => s.trim()).filter(s => s.length > 2);
+    }
+
+    // If we found at least something, treat it as success
+    if (sections.summary || sections.conclusions.length > 0) return { ...sections, transcription: '' };
+    
+    return null;
 }
 
 /**
@@ -38,7 +81,7 @@ function smartUnwrap(item: any): string {
     if (item === null || item === undefined) return '';
     
     if (Array.isArray(item)) {
-        return item.map(i => smartUnwrap(i)).join(', ');
+        return item.map(i => smartUnwrap(i)).join('\n');
     }
 
     if (typeof item === 'object') {
@@ -55,7 +98,10 @@ function smartUnwrap(item: any): string {
 }
 
 function sanitizeArray(arr: any): string[] {
-    if (!Array.isArray(arr)) return [];
+    if (!Array.isArray(arr)) {
+        if (typeof arr === 'string') return [arr];
+        return [];
+    }
     return arr.map(item => smartUnwrap(item)).filter(s => s.trim() !== '');
 }
 
@@ -83,7 +129,7 @@ export const processMeetingAudio = async (
     let offset = 0;
     let chunkIndex = 0;
 
-    log("Step 1/3: Securing audio in Cloud (Drive & Analysis Server).");
+    log("Step 1/3: Storing audio in cloud storage...");
 
     while (offset < totalBytes) {
         const chunkEnd = Math.min(offset + UPLOAD_CHUNK_SIZE, totalBytes);
@@ -107,12 +153,12 @@ export const processMeetingAudio = async (
         body: JSON.stringify({ jobId, totalChunks: chunkIndex, mimeType, mode, model, fileSize: totalBytes, uid })
     });
 
-    if (!triggerResp.ok) throw new Error("Worker handshake failed.");
+    if (!triggerResp.ok) throw new Error("Processing initialization failed.");
 
     let attempts = 0;
     let lastKnownLog = "";
 
-    while (attempts < 1800) { // 2 hours timeout for long sessions
+    while (attempts < 1800) { 
         attempts++;
         await new Promise(r => setTimeout(r, 4000));
         const pollResp = await fetch('/.netlify/functions/gemini', {
@@ -135,7 +181,7 @@ export const processMeetingAudio = async (
             if (data.status === 'ERROR') throw new Error(data.error);
         }
     }
-    throw new Error("Timeout: Gemini is taking too long for this meeting.");
+    throw new Error("Timeout: The meeting is taking longer than expected.");
   } catch (error) {
     log(`FATAL: ${error instanceof Error ? error.message : 'Unknown error'}`);
     throw error;
@@ -166,10 +212,18 @@ function parseResponse(jsonText: string, mode: ProcessingMode): MeetingData {
     const rawData = extractJson(jsonText);
     
     if (!rawData) {
-        console.error("Extraction failed for:", jsonText);
+        // Hammer Fallback: Try heuristic parsing of plain text
+        const heuristic = heuristicParse(jsonText);
+        if (heuristic) {
+            return {
+                ...heuristic,
+                transcription: jsonText // Assume whole text might be transcription if everything else failed
+            };
+        }
+
         return { 
-          transcription: "Error parsing result. Raw response was not a valid JSON structure.", 
-          summary: "The AI response was malformed. This can happen with very long or noisy recordings.", 
+          transcription: jsonText || "No transcription found.", 
+          summary: "Analysis finished, but content was not in the expected format.", 
           conclusions: [], 
           actionItems: [] 
         };
