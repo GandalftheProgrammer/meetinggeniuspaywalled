@@ -1,4 +1,3 @@
-
 import { MeetingData, ProcessingMode, GeminiModel, PipelineStep, PipelineUpdate, TokenUsage, PipelineEvent, PipelineStatus } from '../types';
 
 const SEGMENT_DURATION_SECONDS = 1800; // 30 minutes
@@ -345,31 +344,46 @@ export const processMeetingAudio = async (
                  
                  // --- FINAL ANALYTICS LOGGING ---
                  const endTime = Date.now();
-                 const durationSec = ((endTime - startTime) / 1000).toFixed(1);
-                 
-                 // Estimate cost (Roughly $0.075/1M input, $0.30/1M output for 1.5 Flash - adjust for 2.0/3.0 preview pricing as needed)
-                 // Using placeholder rates for Flash
-                 const costInput = (data.usage?.totalInputTokens || 0) / 1_000_000 * 0.075;
-                 const costOutput = (data.usage?.totalOutputTokens || 0) / 1_000_000 * 0.30;
-                 const estCost = (costInput + costOutput).toFixed(6);
+                 const durationMs = endTime - startTime;
 
-                 log(18, "📊 FINAL PERFORMANCE ANALYTICS", {
-                     totalTime: `${durationSec}s`,
-                     estimatedCost: `$${estCost}`,
-                     tokens: {
-                        total: data.usage?.totalTokens,
-                        input: data.usage?.totalInputTokens,
-                        output: data.usage?.totalOutputTokens
-                     },
-                     stopReasons: data.usage?.details?.map((d: any) => `${d.step}: ${d.finishReason || 'OK'}`).join(', '),
-                     rawOutputs: {
-                        summary: data.debug?.rawSummary ? "(Present)" : "(Missing)",
-                        transcript: data.debug?.rawTranscript ? "(Present)" : "(Missing)",
-                        // Actually logging the full content in the expandable object
-                        _fullRawSummary: data.debug?.rawSummary,
-                        _fullRawTranscript: data.debug?.rawTranscript
-                     }
+                 // Prepare Table Data
+                 const details = data.usage?.details || [];
+                 const tableData = details.map((row: any) => ({
+                    'Gemini Call': row.step,
+                    'Input Tokens': row.input,
+                    'Output Tokens': row.output,
+                    'Total Tokens': (row.input || 0) + (row.output || 0),
+                    'Compute Time (ms)': row.duration || 'N/A',
+                    'Stop Reason': row.finishReason || 'UNKNOWN'
+                 }));
+
+                 // Calculate Totals
+                 const totalIn = data.usage?.totalInputTokens || 0;
+                 const totalOut = data.usage?.totalOutputTokens || 0;
+                 tableData.push({
+                    'Gemini Call': 'TOTAL',
+                    'Input Tokens': totalIn,
+                    'Output Tokens': totalOut,
+                    'Total Tokens': totalIn + totalOut,
+                    'Compute Time (ms)': `${durationMs} (Wall)`,
+                    'Stop Reason': '-'
                  });
+
+                 console.log(""); // Visual break
+                 console.group(`%c 📊 MISSION REPORT: Job ${jobId}`, "font-size: 14px; font-weight: bold; color: #15803d; background: #dcfce7; padding: 4px; border-radius: 4px;");
+                 console.table(tableData);
+                 console.groupEnd();
+
+                 // Raw Outputs
+                 if (data.debug?.rawSummary) {
+                     console.log(`%c📝 RAW SUMMARY OUTPUT`, "font-size: 12px; font-weight: bold; color: #7c3aed; margin-top: 10px; margin-bottom: 5px;");
+                     console.log(`%c${data.debug.rawSummary}`, "color: #334155; font-family: monospace; font-size: 11px; white-space: pre-wrap; background: #f8fafc; padding: 10px; border: 1px solid #e2e8f0; display: block; width: 100%;");
+                 }
+                 
+                 if (data.debug?.rawTranscript) {
+                     console.log(`%c📝 RAW TRANSCRIPT OUTPUT`, "font-size: 12px; font-weight: bold; color: #7c3aed; margin-top: 15px; margin-bottom: 5px;");
+                     console.log(`%c${data.debug.rawTranscript}`, "color: #334155; font-family: monospace; font-size: 11px; white-space: pre-wrap; background: #f8fafc; padding: 10px; border: 1px solid #e2e8f0; display: block; width: 100%;");
+                 }
 
                  const parsed = extractContent(data.result);
                  if (data.usage) parsed.usage = data.usage;

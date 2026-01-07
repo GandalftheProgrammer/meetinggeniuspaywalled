@@ -104,6 +104,7 @@ export default async (req: Request) => {
         await waitForFileActive(uri, encodedKey);
 
         // 3. Generate Summary
+        const tStart = Date.now();
         const res = await callGeminiWithFiles(
             [uri], 
             mimeType, 
@@ -111,6 +112,7 @@ export default async (req: Request) => {
             encodedKey, 
             PROMPT_SUMMARY_AND_ACTIONS
         );
+        const duration = Date.now() - tStart;
 
         // 4. Save Result
         await updateState((s) => {
@@ -119,10 +121,11 @@ export default async (req: Request) => {
                 totalInputTokens: res.usageMetadata.promptTokenCount,
                 totalOutputTokens: res.usageMetadata.candidatesTokenCount,
                 details: [{ 
-                    step: 'Summary', 
+                    step: 'Summary Analysis', 
                     input: res.usageMetadata.promptTokenCount, 
                     output: res.usageMetadata.candidatesTokenCount,
-                    finishReason: res.finishReason
+                    finishReason: res.finishReason,
+                    duration: duration
                 }]
             };
             s.status = 'COMPLETED';
@@ -163,8 +166,16 @@ export default async (req: Request) => {
         
         const tasks = fileUris.map(async (uri, idx) => {
             const prompt = `${PROMPT_VERBATIM_TRANSCRIPT}\n(Part ${idx+1})`;
+            const tStart = Date.now();
             const res = await callGeminiWithFiles([uri], mimeType, model, encodedKey, prompt);
-            return { index: idx, text: res.text, usage: res.usageMetadata, finishReason: res.finishReason };
+            const tEnd = Date.now();
+            return { 
+                index: idx, 
+                text: res.text, 
+                usage: res.usageMetadata, 
+                finishReason: res.finishReason,
+                duration: tEnd - tStart
+            };
         });
         
         const results = await Promise.all(tasks);
@@ -175,11 +186,13 @@ export default async (req: Request) => {
         
         let totalInput = 0;
         let totalOutput = 0;
+        let totalDuration = 0;
         const reasons: string[] = [];
         
         results.forEach(r => {
              totalInput += r.usage.promptTokenCount;
              totalOutput += r.usage.candidatesTokenCount;
+             totalDuration += r.duration;
              if (r.finishReason) reasons.push(r.finishReason);
         });
 
@@ -190,10 +203,11 @@ export default async (req: Request) => {
                 totalInputTokens: totalInput,
                 totalOutputTokens: totalOutput,
                 details: [{ 
-                    step: 'Transcript', 
+                    step: `Transcript (Merged ${results.length} Parts)`, 
                     input: totalInput, 
                     output: totalOutput,
-                    finishReason: [...new Set(reasons)].join(', ') // unique reasons
+                    finishReason: [...new Set(reasons)].join(', '), // unique reasons
+                    duration: totalDuration
                 }]
             };
             s.status = 'COMPLETED';
