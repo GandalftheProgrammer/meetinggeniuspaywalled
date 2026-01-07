@@ -1,5 +1,5 @@
 
-import { MeetingData, ProcessingMode, GeminiModel, PipelineStep, PipelineUpdate } from '../types';
+import { MeetingData, ProcessingMode, GeminiModel, PipelineStep, PipelineUpdate, TokenUsage } from '../types';
 
 const SEGMENT_DURATION_SECONDS = 1800; // 30 minutes
 const TARGET_SAMPLE_RATE = 16000; // 16kHz Mono
@@ -270,29 +270,38 @@ export const processMeetingAudio = async (
             
             // Sync Remote Steps
             if (data.currentStepId && data.currentStepStatus) {
-                // If step changed OR detail changed (for granular progress), log/update
-                if (data.currentStepId !== lastRemoteStep || data.currentStepStatus === 'completed' || data.currentStepDetail) {
-                    // Only log to console if ID changed or status completed to avoid spamming "35%.. 36%.."
-                    if (data.currentStepId !== lastRemoteStep || data.currentStepStatus === 'completed') {
-                         log(data.currentStepId, `Remote Status: ${data.currentStepStatus}`, { 
-                            detail: data.currentStepDetail,
-                            serverMetadata: data.metadata 
-                        });
-                        lastRemoteStep = data.currentStepId;
-                    }
+                // Log significant remote updates to console
+                if (data.currentStepId !== lastRemoteStep || data.currentStepStatus === 'completed' || (data.currentStepDetail && !data.currentStepDetail.includes('%'))) {
+                     log(data.currentStepId, `Remote Status Update: ${data.currentStepStatus}`, { 
+                        stepId: data.currentStepId,
+                        detail: data.currentStepDetail,
+                    });
+                    lastRemoteStep = data.currentStepId;
                 }
                 setStep(data.currentStepId, data.currentStepStatus, data.currentStepDetail);
             }
 
             if (data.status === 'COMPLETED') {
-                 log(18, "Process Completed", { resultLength: data.result.length });
+                 log(18, "Process Completed Successfully");
                  
-                 // EXPLICITLY LOG RAW DATA FOR USER VERIFICATION
+                 // --- FINAL REPORT ---
+                 if (data.usage) {
+                    console.group("%c 📊 TOKEN USAGE REPORT", "background: #10b981; color: white; font-weight: bold; padding: 4px 8px; border-radius: 4px;");
+                    console.log(`Total Input Tokens:  ${data.usage.totalInputTokens}`);
+                    console.log(`Total Output Tokens: ${data.usage.totalOutputTokens}`);
+                    console.log(`Total Cost Basis:    ${data.usage.totalTokens}`);
+                    console.table(data.usage.details);
+                    console.groupEnd();
+                 }
+
                  console.log("%c🔍 RAW UNTOUCHED GEMINI OUTPUT:", "background: #000; color: #bada55; padding: 4px; font-weight: bold;", data.result);
 
                  // Force complete all steps to ensure 100% green UI at the end
                  for (let s = 9; s <= 18; s++) setStep(s, 'completed');
-                 return extractContent(data.result);
+                 
+                 const parsed = extractContent(data.result);
+                 if (data.usage) parsed.usage = data.usage;
+                 return parsed;
             }
             if (data.status === 'ERROR') {
                 log(lastRemoteStep, "Remote Error", { error: data.error });

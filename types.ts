@@ -23,11 +23,23 @@ export type GeminiModel =
 // 5 hours in seconds (5 * 60 * 60)
 export const FREE_LIMIT_SECONDS = 18000;
 
+export interface TokenUsage {
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalTokens: number;
+  details?: {
+    step: string;
+    input: number;
+    output: number;
+  }[];
+}
+
 export interface MeetingData {
   transcription: string;
   summary: string;
   conclusions: string[];
   actionItems: string[];
+  usage?: TokenUsage;
 }
 
 export interface UserProfile {

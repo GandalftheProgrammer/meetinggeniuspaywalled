@@ -189,6 +189,14 @@ export default async (req: Request) => {
     await setStep(13, 'completed');
 
     const swarmTasks: Promise<any>[] = [];
+    
+    // Usage stats container
+    const usageStats = {
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        totalTokens: 0,
+        details: [] as any[]
+    };
 
     // TASK A: SUMMARY
     if (mode !== 'TRANSCRIPT_ONLY') {
@@ -203,8 +211,13 @@ export default async (req: Request) => {
                 encodedKey, 
                 PROMPT_SUMMARY_AND_ACTIONS
             );
-            sLog(14, "Summary Task Complete", { duration: Date.now() - tStart, outputLen: res.text.length });
-            return { type: 'NOTES', data: res.text };
+            sLog(14, "Summary Task Complete", { duration: Date.now() - tStart, outputLen: res.text.length, finishReason: res.finishReason });
+            
+            return { 
+                type: 'NOTES', 
+                data: res.text,
+                usage: { step: 'Summary', input: res.usageMetadata.promptTokenCount, output: res.usageMetadata.candidatesTokenCount }
+            };
         })());
     } else {
         await setStep(14, 'completed', 'Skipped');
@@ -225,8 +238,13 @@ export default async (req: Request) => {
                     encodedKey, 
                     prompt
                 );
-                sLog(15, `Transcript Task Seg ${idx} Complete`, { duration: Date.now() - tStart, outputLen: res.text.length });
-                return { type: 'TRANSCRIPT', index: idx, data: res.text };
+                sLog(15, `Transcript Task Seg ${idx} Complete`, { duration: Date.now() - tStart, outputLen: res.text.length, finishReason: res.finishReason });
+                return { 
+                    type: 'TRANSCRIPT', 
+                    index: idx, 
+                    data: res.text,
+                    usage: { step: `Transcript Seg ${idx+1}`, input: res.usageMetadata.promptTokenCount, output: res.usageMetadata.candidatesTokenCount }
+                };
             })());
         });
     } else {
@@ -235,6 +253,17 @@ export default async (req: Request) => {
 
     // WAIT FOR RESULTS
     const swarmResults = await Promise.all(swarmTasks);
+    
+    // Aggregate Usage
+    swarmResults.forEach(r => {
+        if (r.usage) {
+            usageStats.details.push(r.usage);
+            usageStats.totalInputTokens += (r.usage.input || 0);
+            usageStats.totalOutputTokens += (r.usage.output || 0);
+        }
+    });
+    usageStats.totalTokens = usageStats.totalInputTokens + usageStats.totalOutputTokens;
+
     await setStep(14, 'completed');
     await setStep(15, 'completed');
     
@@ -251,13 +280,14 @@ export default async (req: Request) => {
 
     await setStep(17, 'processing');
     const resultText = `${finalNotes}\n\n[TRANSCRIPTION]\n${finalTranscript}`;
-    sLog(17, "Final Result Assembled", { totalLength: resultText.length });
+    sLog(17, "Final Result Assembled", { totalLength: resultText.length, totalTokens: usageStats.totalTokens });
     await setStep(17, 'completed');
 
     await setStep(18, 'processing', 'Saving...');
     await resultStore.setJSON(jobId, { 
         status: 'COMPLETED', 
-        result: resultText
+        result: resultText,
+        usage: usageStats // Pass usage back to client
     });
     sLog(18, "Job Completed Successfully");
 
@@ -279,7 +309,8 @@ async function waitForFileActive(fileUri: string, encodedKey: string) {
     }
 }
 
-async function callGeminiWithFiles(fileUris: string[], mimeType: string, model: string, encodedKey: string, promptText: string): Promise<{text: string}> {
+// Updated to return full metadata
+async function callGeminiWithFiles(fileUris: string[], mimeType: string, model: string, encodedKey: string, promptText: string): Promise<{text: string, usageMetadata: any, finishReason: string}> {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodedKey}`;
     
     const parts: any[] = fileUris.map(uri => ({ file_data: { file_uri: uri, mime_type: mimeType } }));
@@ -302,5 +333,13 @@ async function callGeminiWithFiles(fileUris: string[], mimeType: string, model: 
         throw new Error(`Gemini API Error ${resp.status}: ${errText}`);
     }
     const data = await resp.json();
-    return { text: data.candidates?.[0]?.content?.parts?.[0]?.text || "" };
+    
+    const candidate = data.candidates?.[0];
+    const text = candidate?.content?.parts?.[0]?.text || "";
+    const finishReason = candidate?.finishReason || "UNKNOWN";
+    
+    // Extract usage metadata (Google returns camelCase in this endpoint usually)
+    const usageMetadata = data.usageMetadata || { promptTokenCount: 0, candidatesTokenCount: 0, totalTokenCount: 0 };
+
+    return { text, usageMetadata, finishReason };
 }
