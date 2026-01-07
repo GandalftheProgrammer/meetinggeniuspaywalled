@@ -59,7 +59,7 @@ ${data.summary.trim() || "No summary returned."}
 ## Conclusions & Insights
 ${data.conclusions.length > 0 ? data.conclusions.map(d => `- ${d}`).join('\n') : "No conclusions recorded."}
 
-## Action Items
+## Action Points
 ${data.actionItems.length > 0 ? data.actionItems.map(item => `- [ ] ${item}`).join('\n') : "No action items identified."}
   `.trim();
 

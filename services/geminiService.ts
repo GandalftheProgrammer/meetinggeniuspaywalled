@@ -25,8 +25,8 @@ export const INITIAL_PIPELINE_STEPS: PipelineStep[] = [
     { id: 18, label: "Sync", status: 'pending' }
 ];
 
-// --- HIGH RES LOGGER ---
-const log = (stepId: number, title: string, data?: any) => {
+// --- HIGH RES LOGGER (Exported for App.tsx) ---
+export const log = (stepId: number, title: string, data?: any) => {
     const time = new Date().toISOString().split('T')[1].slice(0, -1); // HH:mm:ss.SSS
     const stepLabel = `STEP ${stepId.toString().padStart(2, '0')}`;
     
@@ -39,7 +39,7 @@ const log = (stepId: number, title: string, data?: any) => {
     
     if (data) {
         if (typeof data === 'object') {
-            console.table(data); // Using table for arrays/objects is cleaner
+            console.table(data); 
         } else {
             console.log(data);
         }
@@ -303,42 +303,94 @@ export const processMeetingAudio = async (
   }
 };
 
+// --- ROBUST FUZZY PARSER ---
 function extractContent(text: string): MeetingData {
     const data: MeetingData = { transcription: '', summary: '', conclusions: [], actionItems: [] };
     if (!text) return data;
 
+    // Log the raw text for debugging if needed
+    console.log("Raw Server Output:", text);
+
     const cleanMarkdown = (s: string) => s.replace(/\*\*/g, '').trim();
 
-    const findSection = (tags: string[]) => {
-        for (const tag of tags) {
-            // Case insensitive match for the tag inside brackets, e.g. [CONCLUSIONS & INSIGHTS] or [CONCLUSIONS]
-            // We escape special regex characters in the tag (like &)
-            const escapedTag = tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); 
-            const regex = new RegExp(`\\[${escapedTag}\\]([\\s\\S]*?)(?=\\[|$)`, 'i');
-            const match = text.match(regex);
-            if (match) {
-                return cleanMarkdown(match[1]);
+    // The fuzzy extraction logic
+    const extractSection = (headerKeywords: string[]): string => {
+        // Construct a flexible Regex
+        // 1. (?:^|\n): Start of string or new line
+        // 2. [\s\#\*\[]*: Optional whitespace, hash, asterisks, or opening brackets
+        // 3. (${headerKeywords.join('|')}): The keyword (case insensitive)
+        // 4. [\s\]\*\:]*: Optional whitespace, closing brackets, asterisks, or colons
+        // 5. (?:\n|$): End of line
+        // 6. ([\s\S]*?): Capture EVERYTHING after...
+        // 7. (?=(?:^|\n)[\s\#\*\[]*(?:Summary|Conclusions|Action|Transcription)|$): ...until the next major header or end of string
+        
+        // We use a simplified approach: Find the start index of the header, then find the start index of the NEXT header.
+        
+        const normalizedText = text;
+        const lowerText = normalizedText.toLowerCase();
+        
+        // Find best match for header
+        let bestIndex = -1;
+        let bestHeaderLen = 0;
+
+        for (const kw of headerKeywords) {
+            // Regex to find "Header" surrounded by likely Markdown chars, at start of a line
+            const regex = new RegExp(`(?:^|\\n)[\\s\\#\\*\\[]*${kw}[\\s\\]\\*\\:]*(?:\\n|$)`, 'i');
+            const match = normalizedText.match(regex);
+            if (match && match.index !== undefined) {
+                // found it
+                bestIndex = match.index + match[0].length;
+                bestHeaderLen = match[0].length;
+                break;
             }
         }
-        return null;
+
+        if (bestIndex === -1) return "";
+
+        // Now find the end of this section by looking for the start of ANY other section
+        // We look for other known headers: Summary, Conclusions, Action, Transcription
+        const allHeaders = ['Summary', 'Conclusions', 'Action Points', 'Transcription', 'Action Items']; 
+        
+        let nearestNextHeaderIndex = normalizedText.length;
+
+        for (const otherH of allHeaders) {
+             const regex = new RegExp(`(?:^|\\n)[\\s\\#\\*\\[]*${otherH}[\\s\\]\\*\\:]*(?:\\n|$)`, 'i');
+             // We need to find matches AFTER bestIndex
+             // Simple slice check
+             const remainingText = normalizedText.slice(bestIndex);
+             const match = remainingText.match(regex);
+             if (match && match.index !== undefined) {
+                 const absoluteIndex = bestIndex + match.index;
+                 if (absoluteIndex < nearestNextHeaderIndex) {
+                     nearestNextHeaderIndex = absoluteIndex;
+                 }
+             }
+        }
+
+        return cleanMarkdown(normalizedText.slice(bestIndex, nearestNextHeaderIndex));
     };
 
-    data.summary = findSection(['SUMMARY']) || '';
-    // Looks for 'CONCLUSIONS & INSIGHTS' first, then 'CONCLUSIONS' as fallback
-    const rawConclusions = findSection(['CONCLUSIONS & INSIGHTS', 'CONCLUSIONS']) || '';
-    const rawActions = findSection(['ACTIONS']) || '';
-    data.transcription = findSection(['TRANSCRIPTION']) || '';
+    data.summary = extractSection(['Summary']);
+    data.conclusions = extractSection(['Conclusions & Insights', 'Conclusions'])
+                        .split('\n')
+                        .map(cleanListItem)
+                        .filter(l => l.length > 2);
 
-    const cleanListItem = (line: string) => {
-        let cleaned = line.replace(/^[\s\-\*•\d\.\)]+/, ''); 
-        return cleanMarkdown(cleaned);
-    };
+    data.actionItems = extractSection(['Action Points', 'Action Items', 'Actions'])
+                        .split('\n')
+                        .map(cleanListItem)
+                        .filter(l => l.length > 2);
 
-    data.conclusions = rawConclusions.split('\n').map(cleanListItem).filter(l => l.length > 2);
-    data.actionItems = rawActions.split('\n').map(cleanListItem).filter(l => l.length > 2);
+    data.transcription = extractSection(['Transcription', 'Transcript']);
 
     return data;
 }
+
+const cleanListItem = (line: string) => {
+    // Remove markdown bullets, numbers, checkboxes
+    let cleaned = line.replace(/^[\s\-\*•\d\.\)\[\]_]+/, ''); 
+    return cleaned.replace(/\*\*/g, '').trim();
+};
 
 function blobToBase64(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {

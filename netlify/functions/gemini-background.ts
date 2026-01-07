@@ -13,18 +13,18 @@ Your task is to analyze the COMPLETE interaction across all audio files and outp
 STRICT OUTPUT FORMAT RULES:
 1. Output MUST be in the native language of the speakers.
 2. Do NOT use markdown bolding (double asterisks) in headers or lists. Keep text clean.
-3. Do NOT make interpretations yourself, stick with interpretations/insights/agreements made by the speakers
-4. Use the following specific tags to separate sections:
+3. Do NOT make interpretations yourself, stick with interpretations/insights/agreements made by the speakers.
+4. Use the following specific headers to separate sections:
 
-[SUMMARY]
+[Summary]
 Provide a summary by describing the relevant things that were discussed. Focus on the content, not on the personal chit chat (unless relevant).
 
-[CONCLUSIONS & INSIGHTS]
+[Conclusions & Insights]
 List the key conclusions and insights.
 - Conclusion/insight 1
 - Conclusion/insight 2
 
-[ACTIONS]
+[Action Points]
 List of agreed action items.
 - [ ] Person: Task description
 - [ ] Person: Task description

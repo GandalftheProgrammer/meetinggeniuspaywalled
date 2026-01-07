@@ -14,7 +14,7 @@ interface RecorderProps {
   onRecordingChange: (isRecording: boolean) => void;
   onFileUpload: (file: File) => void;
   audioUrl: string | null;
-  pipelineSteps: PipelineStep[]; // CHANGED: Now receives structured steps instead of strings
+  pipelineSteps: PipelineStep[]; 
   user: UserProfile | null;
   onUpgrade: () => void;
   onLogin: () => void;
@@ -232,6 +232,13 @@ const Recorder: React.FC<RecorderProps> = ({
                     const isDone = step.status === 'completed';
                     const isPending = step.status === 'pending';
                     const isError = step.status === 'error';
+                    
+                    // Logic to extract percentage for Granular Progress Bar
+                    let percent = 0;
+                    if (isActive && step.detail) {
+                        const match = step.detail.match(/\((\d+)%\)/);
+                        if (match) percent = parseInt(match[1]);
+                    }
 
                     return (
                         <div 
@@ -257,7 +264,14 @@ const Recorder: React.FC<RecorderProps> = ({
                                 </div>
                                 {isActive && (
                                     <div className="h-1 w-full bg-slate-100 rounded-full mt-2 overflow-hidden">
-                                        <div className="h-full bg-blue-500 animate-[shimmer_2s_infinite_linear] w-[40%] rounded-full relative overflow-hidden after:absolute after:inset-0 after:bg-gradient-to-r after:from-transparent after:via-white/30 after:to-transparent after:animate-[shimmer_1s_infinite]"></div>
+                                        {percent > 0 ? (
+                                            <div 
+                                                className="h-full bg-blue-500 transition-all duration-300 ease-out rounded-full"
+                                                style={{ width: `${percent}%` }}
+                                            />
+                                        ) : (
+                                            <div className="h-full bg-blue-500 animate-[shimmer_2s_infinite_linear] w-[40%] rounded-full relative overflow-hidden after:absolute after:inset-0 after:bg-gradient-to-r after:from-transparent after:via-white/30 after:to-transparent after:animate-[shimmer_1s_infinite]"></div>
+                                        )}
                                     </div>
                                 )}
                             </div>

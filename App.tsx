@@ -7,7 +7,7 @@ import Footer from './components/Footer';
 import PrivacyPolicy from './components/PrivacyPolicy';
 import TermsOfService from './components/TermsOfService';
 import { AppState, MeetingData, ProcessingMode, GeminiModel, UserProfile, PipelineStep, PipelineUpdate } from './types';
-import { processMeetingAudio, INITIAL_PIPELINE_STEPS } from './services/geminiService';
+import { processMeetingAudio, INITIAL_PIPELINE_STEPS, log } from './services/geminiService';
 import { initDrive, connectToDrive, uploadAudioToDrive, uploadTextToDrive, disconnectDrive, checkDriveStatus, getAccessToken, ensureValidToken } from './services/driveService';
 import { saveChunkToDB, getPendingSessions, getChunksForSession, cleanupOldSessions, deleteSessionData } from './services/db';
 import { Zap, Shield, Cloud, Loader2 } from 'lucide-react';
@@ -64,8 +64,6 @@ const App: React.FC = () => {
           return step;
       }));
   };
-
-  const addLog = (msg: string) => { console.log(msg); }; // Legacy compatibility shim
 
   const getAccurateAudioDuration = async (blob: Blob): Promise<number> => {
     try {
@@ -259,6 +257,7 @@ const App: React.FC = () => {
 
     try {
       // Step 1: Input Received
+      log(1, "Input Received", { title: finalTitle, blobSize: combinedBlob.size });
       updatePipelineStep({ stepId: 1, status: 'processing' });
       await new Promise(r => setTimeout(r, 600)); // Visible delay for comfort
       updatePipelineStep({ stepId: 1, status: 'completed' });
@@ -278,6 +277,7 @@ const App: React.FC = () => {
       const cleanTitle = finalTitle.replace(/[()]/g, '').trim();
 
       // Step 2: Drive Backup (Conditional)
+      log(2, "Secure Drive Backup", { isConnected: localStorage.getItem('mg_drive_connected') === 'true' });
       updatePipelineStep({ stepId: 2, status: 'processing' });
       if (localStorage.getItem('mg_drive_connected') === 'true') {
         try {
@@ -315,7 +315,10 @@ const App: React.FC = () => {
       if (localStorage.getItem('mg_drive_connected') === 'true') {
         try {
             if (newData.summary || newData.conclusions.length > 0) {
-              const notesMd = `[NOTES] ${cleanTitle}\nRecorded on ${dateTimeStrInternal}\n\n${newData.summary}\n\n## Conclusions\n${newData.conclusions.map(i => `- ${i}`).join('\n')}\n\n## Action Items\n${newData.actionItems.map(i => `- ${i}`).join('\n')}`;
+              // Construct Markdown for Drive
+              // We use ## for headers so the Drive Service converts them to H2
+              const notesMd = `[NOTES] ${cleanTitle}\nRecorded on ${dateTimeStrInternal}\n\n## Summary\n${newData.summary}\n\n## Conclusions & Insights\n${newData.conclusions.map(i => `- ${i}`).join('\n')}\n\n## Action Points\n${newData.actionItems.map(i => `- ${i}`).join('\n')}`;
+              
               await uploadTextToDrive(`${cleanTitle} on ${dateTimeStrFilename} - notes`, notesMd, 'Notes', user.uid);
             }
             if (newData.transcription?.trim()) {
