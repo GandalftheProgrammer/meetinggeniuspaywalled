@@ -1,103 +1,86 @@
 
 import { MeetingData, ProcessingMode, GeminiModel } from '../types';
 
-/**
- * Aggressively cleans strings from any leading list markers (bullets, numbers, dashes).
- */
-function cleanListMarker(text: string): string {
-    if (!text) return '';
-    // Removes leading dashes, asterisks, bullets (•), or numbers followed by dot/space
-    return text.replace(/^[\s\-\*•\d\.\)]+/, '').trim();
-}
+const SEGMENT_DURATION_SECONDS = 1800; // 30 minutes is optimal for memory and precision
 
 /**
- * Robustly extracts content from a string using JSON or Tag-based logic.
+ * Physically slices an audio blob into multiple segments using the Web Audio API.
  */
-function extractContent(text: string): MeetingData {
-    const data: MeetingData = {
-        transcription: '',
-        summary: '',
-        conclusions: [],
-        actionItems: []
-    };
+async function sliceAudioIntoSegments(blob: Blob): Promise<Blob[]> {
+    const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const arrayBuffer = await blob.arrayBuffer();
+    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+    
+    const segments: Blob[] = [];
+    const totalDuration = audioBuffer.duration;
+    const numSegments = Math.ceil(totalDuration / SEGMENT_DURATION_SECONDS);
 
-    if (!text) return data;
-
-    // 1. Try JSON extraction first
-    try {
-        const jsonMatch = text.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-            const parsed = JSON.parse(jsonMatch[0].replace(/,\s*([\]}])/g, '$1'));
-            data.summary = smartUnwrap(parsed.summary);
-            data.conclusions = sanitizeArray(parsed.conclusions);
-            data.actionItems = sanitizeArray(parsed.actionItems);
-            data.transcription = smartUnwrap(parsed.transcription);
-            if (data.summary || data.conclusions.length > 0) return data;
-        }
-    } catch (e) {}
-
-    // 2. Tag-based extraction (The Hammer v2)
-    const findSection = (tags: string[]) => {
-        for (const tag of tags) {
-            const regex = new RegExp(`\\[${tag}\\]([\\s\\S]*?)(?=\\[|$)`, 'i');
-            const match = text.match(regex);
-            if (match) return match[1].trim();
-        }
-        return null;
-    };
-
-    const rawSummary = findSection(['SUMMARY', 'SAMENVATTING', 'OVERZICHT']);
-    const rawConclusions = findSection(['CONCLUSIONS', 'CONCLUSIES', 'INSIGHTS', 'BELANGRIJKSTE_PUNTEN']);
-    const rawActions = findSection(['ACTIONS', 'ACTIES', 'TAKEN', 'ACTION_ITEMS']);
-    const rawTranscript = findSection(['TRANSCRIPTION', 'TRANSCRIPT', 'TEKST']);
-
-    if (rawSummary) data.summary = rawSummary;
-    if (rawConclusions) data.conclusions = sanitizeArray(rawConclusions.split(/\n/));
-    if (rawActions) data.actionItems = sanitizeArray(rawActions.split(/\n/));
-    if (rawTranscript) data.transcription = rawTranscript;
-
-    // 3. Fallback: If no tags found, check for Markdown headers
-    if (!data.summary && text.length > 50) {
-        const lines = text.split('\n');
-        let currentSection: 'summary' | 'conclusions' | 'actions' | null = 'summary';
+    for (let i = 0; i < numSegments; i++) {
+        const startOffset = i * SEGMENT_DURATION_SECONDS;
+        const endOffset = Math.min((i + 1) * SEGMENT_DURATION_SECONDS, totalDuration);
+        const duration = endOffset - startOffset;
         
-        for (const line of lines) {
-            const lower = line.toLowerCase();
-            if (lower.includes('conclusion') || lower.includes('conclusie')) { currentSection = 'conclusions'; continue; }
-            if (lower.includes('action') || lower.includes('actie') || lower.includes('taken')) { currentSection = 'actions'; continue; }
-            
-            const cleaned = cleanListMarker(line);
-            if (!cleaned) continue;
-
-            if (currentSection === 'summary') data.summary += (data.summary ? ' ' : '') + cleaned;
-            else if (currentSection === 'conclusions') data.conclusions.push(cleaned);
-            else if (currentSection === 'actions') data.actionItems.push(cleaned);
-        }
+        const offlineCtx = new OfflineAudioContext(
+            audioBuffer.numberOfChannels,
+            duration * audioBuffer.sampleRate,
+            audioBuffer.sampleRate
+        );
+        
+        const source = offlineCtx.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(offlineCtx.destination);
+        source.start(0, startOffset, duration);
+        
+        const renderedBuffer = await offlineCtx.startRendering();
+        segments.push(audioBufferToWav(renderedBuffer));
     }
-
-    return data;
+    
+    await audioCtx.close();
+    return segments;
 }
 
-function smartUnwrap(item: any): string {
-    if (typeof item === 'string') return item;
-    if (item === null || item === undefined) return '';
-    if (Array.isArray(item)) return item.map(i => smartUnwrap(i)).join('\n');
-    if (typeof item === 'object') {
-        const keys = ['text', 'task', 'point', 'note', 'summary', 'value'];
-        for (const k of keys) if (item[k]) return String(item[k]);
-        return JSON.stringify(item);
-    }
-    return String(item);
-}
+/**
+ * Converts an AudioBuffer to a WAV Blob.
+ */
+function audioBufferToWav(buffer: AudioBuffer): Blob {
+    const numOfChan = buffer.numberOfChannels;
+    const length = buffer.length * numOfChan * 2 + 44;
+    const outBuffer = new ArrayBuffer(length);
+    const view = new DataView(outBuffer);
+    const channels = [];
+    let i, sample, offset = 0, pos = 0;
 
-function sanitizeArray(arr: any): string[] {
-    if (!Array.isArray(arr)) {
-        if (typeof arr === 'string') {
-            return arr.split('\n').map(line => cleanListMarker(line)).filter(s => s.length > 2);
+    // write WAVE header
+    setUint32(0x46464952);                         // "RIFF"
+    setUint32(length - 8);                         // file length - 8
+    setUint32(0x45564157);                         // "WAVE"
+    setUint32(0x20746d66);                         // "fmt " chunk
+    setUint32(16);                                 // length = 16
+    setUint16(1);                                  // PCM (uncompressed)
+    setUint16(numOfChan);
+    setUint32(buffer.sampleRate);
+    setUint32(buffer.sampleRate * 2 * numOfChan);  // avg. bytes/sec
+    setUint16(numOfChan * 2);                      // block-align
+    setUint16(16);                                 // 16-bit
+    setUint32(0x61746164);                         // "data" - chunk
+    setUint32(length - pos - 4);                   // chunk length
+
+    for (i = 0; i < buffer.numberOfChannels; i++) channels.push(buffer.getChannelData(i));
+
+    while (pos < length) {
+        for (i = 0; i < numOfChan; i++) {
+            sample = Math.max(-1, Math.min(1, channels[i][offset]));
+            sample = (sample < 0 ? sample * 0x8000 : sample * 0x7FFF);
+            view.setInt16(pos, sample, true);
+            pos += 2;
         }
-        return [];
+        offset++;
     }
-    return arr.map(item => cleanListMarker(smartUnwrap(item))).filter(s => s.length > 2);
+
+    return new Blob([outBuffer], { type: 'audio/wav' });
+
+    function setUint16(data: number) { view.setUint16(pos, data, true); pos += 2; }
+    function setUint32(data: number) { view.setUint32(pos, data, true); pos += 4; }
 }
 
 export const processMeetingAudio = async (
@@ -109,91 +92,114 @@ export const processMeetingAudio = async (
   uid?: string
 ): Promise<MeetingData> => {
   const log = (msg: string) => {
-      console.log(msg);
+      console.log(`[GeminiService] ${msg}`);
       if (onLog) onLog(msg);
   };
 
-  const mimeType = getMimeTypeFromBlob(audioBlob, defaultMimeType);
-
   try {
-    const totalBytes = audioBlob.size;
+    log("Step 1/4: Physically slicing audio for maximum precision...");
+    const physicalSegments = await sliceAudioIntoSegments(audioBlob);
+    log(`Physical slicing complete: ${physicalSegments.length} segments created.`);
+
     const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-    const UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024; 
-    const totalChunks = Math.ceil(totalBytes / UPLOAD_CHUNK_SIZE);
-    let offset = 0;
-    let chunkIndex = 0;
+    const segmentManifest: {index: number, size: number}[] = [];
 
-    log("Step 1/3: Sending meeting to secure cloud storage...");
-
-    while (offset < totalBytes) {
-        const chunkEnd = Math.min(offset + UPLOAD_CHUNK_SIZE, totalBytes);
-        const chunkBlob = audioBlob.slice(offset, chunkEnd);
-        const base64Data = await blobToBase64(chunkBlob);
-        const uploadResp = await fetch('/.netlify/functions/gemini', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'upload_chunk', jobId, chunkIndex, data: base64Data })
-        });
-        if (!uploadResp.ok) throw new Error(`Upload failed at segment ${chunkIndex}`);
-        offset += UPLOAD_CHUNK_SIZE;
-        chunkIndex++;
+    log("Step 2/4: Uploading physical segments to cloud storage...");
+    for (let i = 0; i < physicalSegments.length; i++) {
+        const segmentBlob = physicalSegments[i];
+        const totalBytes = segmentBlob.size;
+        const CHUNK_SIZE = 4 * 1024 * 1024;
+        const totalChunks = Math.ceil(totalBytes / CHUNK_SIZE);
+        
+        log(`Uploading Segment ${i+1}/${physicalSegments.length} (${(totalBytes/1024/1024).toFixed(2)} MB)...`);
+        
+        for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
+            const start = chunkIdx * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, totalBytes);
+            const chunk = segmentBlob.slice(start, end);
+            const base64 = await blobToBase64(chunk);
+            
+            const up = await fetch('/.netlify/functions/gemini', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    action: 'upload_chunk', 
+                    jobId, 
+                    chunkIndex: chunkIdx, 
+                    segmentIndex: i, 
+                    data: base64 
+                })
+            });
+            if (!up.ok) throw new Error(`Upload failed for segment ${i} chunk ${chunkIdx}`);
+        }
+        segmentManifest.push({ index: i, size: totalBytes });
     }
-    
+
+    log("Step 3/4: Initializing AI swarm analysis...");
     const triggerResp = await fetch('/.netlify/functions/gemini-background', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jobId, totalChunks: chunkIndex, mimeType, mode, model, fileSize: totalBytes, uid })
+        body: JSON.stringify({ 
+            jobId, 
+            segments: segmentManifest, 
+            mimeType: 'audio/wav', 
+            mode, 
+            model, 
+            uid 
+        })
     });
-    if (!triggerResp.ok) throw new Error("Could not initialize analysis engine.");
+    if (!triggerResp.ok) throw new Error("Could not start background process.");
 
+    log("Step 4/4: Waiting for results...");
     let attempts = 0;
-    let lastKnownLog = "";
-
-    while (attempts < 1800) { 
+    while (attempts < 1200) {
         attempts++;
-        await new Promise(r => setTimeout(r, 3000));
-        const pollResp = await fetch('/.netlify/functions/gemini', {
+        await new Promise(r => setTimeout(r, 4000));
+        const poll = await fetch('/.netlify/functions/gemini', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ action: 'check_status', jobId })
         });
-
-        if (pollResp.ok) {
-            const responseText = await pollResp.text();
-            const payloadSizeKB = (responseText.length / 1024).toFixed(2);
-            
-            const data = JSON.parse(responseText);
-            if (data.lastLog && data.lastLog !== lastKnownLog) {
-                log(`${data.lastLog}`);
-                lastKnownLog = data.lastLog;
-            } else if (attempts % 10 === 0) {
-                // Heartbeat log
-                log(`[POLL] Heartbeat ${attempts} | Payload: ${payloadSizeKB}KB`);
-            }
-            
-            if (data.status === 'COMPLETED') {
-                log(`[COMPLETED] Total attempts: ${attempts} | Final payload size: ${payloadSizeKB}KB`);
-                return extractContent(data.result);
-            }
+        
+        if (poll.ok) {
+            const data = await poll.json();
+            if (data.lastLog) log(data.lastLog);
+            if (data.status === 'COMPLETED') return extractContent(data.result);
             if (data.status === 'ERROR') throw new Error(data.error);
         }
     }
-    throw new Error("Analysis engine timed out.");
+    throw new Error("Analysis timed out.");
   } catch (error) {
-    log(`ERROR: ${error instanceof Error ? error.message : 'Unknown failure'}`);
+    log(`FATAL ERROR: ${error instanceof Error ? error.message : 'Unknown'}`);
     throw error;
   }
 };
 
-function getMimeTypeFromBlob(blob: Blob, defaultType: string): string {
-    if ('name' in blob) {
-        const name = (blob as File).name.toLowerCase();
-        if (name.endsWith('.mp3')) return 'audio/mp3';
-        if (name.endsWith('.m4a')) return 'audio/mp4';
-        if (name.endsWith('.wav')) return 'audio/wav';
-        if (name.endsWith('.webm')) return 'audio/webm';
-    }
-    return blob.type || defaultType;
+/**
+ * Robustly extracts content from a string using JSON or Tag-based logic.
+ */
+function extractContent(text: string): MeetingData {
+    const data: MeetingData = { transcription: '', summary: '', conclusions: [], actionItems: [] };
+    if (!text) return data;
+
+    const findSection = (tags: string[]) => {
+        for (const tag of tags) {
+            const regex = new RegExp(`\\[${tag}\\]([\\s\\S]*?)(?=\\[|$)`, 'i');
+            const match = text.match(regex);
+            if (match) return match[1].trim();
+        }
+        return null;
+    };
+
+    data.summary = findSection(['SUMMARY']) || '';
+    const rawConclusions = findSection(['CONCLUSIONS']) || '';
+    const rawActions = findSection(['ACTIONS']) || '';
+    data.transcription = findSection(['TRANSCRIPTION']) || '';
+
+    data.conclusions = rawConclusions.split('\n').map(l => l.replace(/^[\s\-\*•\d\.\)]+/, '').trim()).filter(l => l.length > 2);
+    data.actionItems = rawActions.split('\n').map(l => l.replace(/^[\s\-\*•\d\.\)]+/, '').trim()).filter(l => l.length > 2);
+
+    return data;
 }
 
 function blobToBase64(blob: Blob): Promise<string> {
