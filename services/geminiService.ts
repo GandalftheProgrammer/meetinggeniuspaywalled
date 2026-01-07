@@ -83,7 +83,13 @@ async function uploadBlobInChunks(
     }
 }
 
-async function sliceAudioIntoSegments(blob: Blob): Promise<Blob[]> {
+// Updated interface to return metadata
+interface SegmentData {
+    blob: Blob;
+    duration: number;
+}
+
+async function sliceAudioIntoSegments(blob: Blob): Promise<{ segments: SegmentData[], totalDuration: number }> {
     const startT = performance.now();
     log(4, "Starting Audio Decoding & Resampling", { inputSize: blob.size, inputType: blob.type });
 
@@ -97,7 +103,7 @@ async function sliceAudioIntoSegments(blob: Blob): Promise<Blob[]> {
         originalSampleRate: audioBuffer.sampleRate 
     });
 
-    const segments: Blob[] = [];
+    const segments: SegmentData[] = [];
     const totalDuration = audioBuffer.duration;
     const numSegments = Math.ceil(totalDuration / SEGMENT_DURATION_SECONDS);
 
@@ -115,7 +121,8 @@ async function sliceAudioIntoSegments(blob: Blob): Promise<Blob[]> {
         
         const renderedBuffer = await offlineCtx.startRendering();
         const wavBlob = audioBufferToWav(renderedBuffer);
-        segments.push(wavBlob);
+        
+        segments.push({ blob: wavBlob, duration: duration });
         
         const segEnd = performance.now();
         log(5, `Segment ${i+1}/${numSegments} Created`, { 
@@ -132,7 +139,7 @@ async function sliceAudioIntoSegments(blob: Blob): Promise<Blob[]> {
     const endT = performance.now();
     log(5, "Segmentation Complete", { totalSegments: segments.length, totalProcessingTimeMs: (endT - startT).toFixed(0) });
     
-    return segments;
+    return { segments, totalDuration };
 }
 
 function audioBufferToWav(buffer: AudioBuffer): Blob {
@@ -191,6 +198,11 @@ export const processMeetingAudio = async (
   const startTime = Date.now();
   const jobId = `job_${startTime}_${Math.random().toString(36).substring(7)}`;
 
+  // Store metadata for final logging
+  let totalAudioDuration = 0;
+  let summaryFileMeta: { size: number, type: string, duration?: number } = { size: audioBlob.size, type: defaultMimeType };
+  let transcriptFilesMeta: { name: string, size: number, type: string, duration: number }[] = [];
+
   try {
     // --- STEP 3: ANALYSIS ---
     setStep(3, 'processing', `${(audioBlob.size / 1024 / 1024).toFixed(2)} MB`);
@@ -239,14 +251,25 @@ export const processMeetingAudio = async (
     if (mode !== 'NOTES_ONLY') {
         // --- STEP 4: OPTIMIZATION (Resampling) ---
         setStep(4, 'processing', 'Resampling...');
-        const physicalSegments = await sliceAudioIntoSegments(audioBlob);
+        const processingResult = await sliceAudioIntoSegments(audioBlob);
+        
+        // Capture metadata for logs
+        totalAudioDuration = processingResult.totalDuration;
+        summaryFileMeta.duration = totalAudioDuration; // Retrospectively set duration for summary file
+        transcriptFilesMeta = processingResult.segments.map((s, i) => ({
+            name: `Segment ${i+1}`,
+            size: s.blob.size,
+            type: 'audio/wav',
+            duration: s.duration
+        }));
+
         setStep(4, 'completed', '16kHz Mono');
 
         // --- STEP 5: SEGMENTATION ---
         setStep(5, 'processing');
         const segmentManifest: {index: number, size: number}[] = [];
         await new Promise(r => setTimeout(r, 300));
-        setStep(5, 'completed', `${physicalSegments.length} slice(s)`);
+        setStep(5, 'completed', `${processingResult.segments.length} slice(s)`);
 
         // --- STEP 6: ENCRYPTION & STAGING ---
         setStep(6, 'processing', 'Chunking...');
@@ -261,20 +284,20 @@ export const processMeetingAudio = async (
         setStep(7, 'completed'); 
 
         // --- STEP 8: SECURE UPLOAD ---
-        const totalSegments = physicalSegments.length;
+        const totalSegments = processingResult.segments.length;
         
         for (let i = 0; i < totalSegments; i++) {
-            const segmentBlob = physicalSegments[i];
+            const segment = processingResult.segments[i];
             
             setStep(8, 'processing', `Uploading seg ${i+1}/${totalSegments} (0%)`);
-            log(8, `Uploading Segment ${i}`, { size: segmentBlob.size });
+            log(8, `Uploading Segment ${i}`, { size: segment.blob.size });
             
             // Reused chunked upload logic
-            await uploadBlobInChunks(jobId, segmentBlob, i, (percent) => {
+            await uploadBlobInChunks(jobId, segment.blob, i, (percent) => {
                 setStep(8, 'processing', `Seg ${i+1}/${totalSegments} (${percent}%)`);
             });
             
-            segmentManifest.push({ index: i, size: segmentBlob.size });
+            segmentManifest.push({ index: i, size: segment.blob.size });
         }
         setStep(8, 'completed');
 
@@ -344,12 +367,41 @@ export const processMeetingAudio = async (
                  for (let s = 9; s <= 19; s++) setStep(s, 'completed');
                  
                  // --- DEEP DIVE LOGGING ---
-                 const ext = defaultMimeType.split('/')[1] || 'bin';
                  console.log("");
                  console.groupCollapsed(`%c 🕵️ DEEP DIVE: Job ${jobId}`, "font-size: 13px; font-weight: bold; color: #0284c7; background: #e0f2fe; padding: 2px 6px; border-radius: 4px;");
-                 console.log(`%cFILE METADATA`, "font-weight: bold; color: #334155; margin-bottom: 4px;");
-                 console.log(`• Input Type:   .${ext.toUpperCase()}`);
-                 console.log(`• Input Size:   ${(audioBlob.size/1024/1024).toFixed(2)} MB`);
+                 
+                 // PREPARE FILE TABLE DATA
+                 const formatTime = (s?: number) => s ? `${Math.floor(s/60)}m ${Math.floor(s%60)}s` : 'Unknown';
+                 const formatSize = (b: number) => `${(b/1024/1024).toFixed(2)} MB`;
+
+                 const filesPayload = [];
+                 
+                 // Summary File
+                 if (mode !== 'TRANSCRIPT_ONLY') {
+                     filesPayload.push({
+                         'Role': 'SUMMARY INPUT',
+                         'File Name': 'Raw Audio',
+                         'Type': `.${summaryFileMeta.type.split('/')[1] || 'bin'}`,
+                         'Size': formatSize(summaryFileMeta.size),
+                         'Duration': formatTime(summaryFileMeta.duration || totalAudioDuration) // Use explicit duration if available, else total
+                     });
+                 }
+
+                 // Transcript Files
+                 if (mode !== 'NOTES_ONLY') {
+                     transcriptFilesMeta.forEach(f => {
+                         filesPayload.push({
+                             'Role': 'TRANSCRIPT SEGMENT',
+                             'File Name': f.name,
+                             'Type': '.wav',
+                             'Size': formatSize(f.size),
+                             'Duration': formatTime(f.duration)
+                         });
+                     });
+                 }
+
+                 console.log(`%cFILES SENT TO GEMINI`, "font-weight: bold; color: #334155; margin-bottom: 4px;");
+                 console.table(filesPayload);
                  console.groupEnd();
 
                  // --- FINAL ANALYTICS LOGGING ---
