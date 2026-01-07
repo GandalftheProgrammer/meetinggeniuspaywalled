@@ -2,6 +2,15 @@
 import { MeetingData, ProcessingMode, GeminiModel } from '../types';
 
 /**
+ * Aggressively cleans strings from any leading list markers (bullets, numbers, dashes).
+ */
+function cleanListMarker(text: string): string {
+    if (!text) return '';
+    // Removes leading dashes, asterisks, bullets (•), or numbers followed by dot/space
+    return text.replace(/^[\s\-\*•\d\.\)]+/, '').trim();
+}
+
+/**
  * Robustly extracts content from a string using JSON or Tag-based logic.
  */
 function extractContent(text: string): MeetingData {
@@ -14,22 +23,20 @@ function extractContent(text: string): MeetingData {
 
     if (!text) return data;
 
-    // 1. Try JSON extraction
+    // 1. Try JSON extraction first
     try {
         const jsonMatch = text.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
             const parsed = JSON.parse(jsonMatch[0].replace(/,\s*([\]}])/g, '$1'));
-            if (parsed.summary || parsed.conclusions) {
-                data.summary = smartUnwrap(parsed.summary);
-                data.conclusions = sanitizeArray(parsed.conclusions);
-                data.actionItems = sanitizeArray(parsed.actionItems);
-                data.transcription = smartUnwrap(parsed.transcription);
-                return data;
-            }
+            data.summary = smartUnwrap(parsed.summary);
+            data.conclusions = sanitizeArray(parsed.conclusions);
+            data.actionItems = sanitizeArray(parsed.actionItems);
+            data.transcription = smartUnwrap(parsed.transcription);
+            if (data.summary || data.conclusions.length > 0) return data;
         }
     } catch (e) {}
 
-    // 2. Tag-based extraction (Markdown-First)
+    // 2. Tag-based extraction (The Hammer v2)
     const findSection = (tags: string[]) => {
         for (const tag of tags) {
             const regex = new RegExp(`\\[${tag}\\]([\\s\\S]*?)(?=\\[|$)`, 'i');
@@ -40,23 +47,31 @@ function extractContent(text: string): MeetingData {
     };
 
     const rawSummary = findSection(['SUMMARY', 'SAMENVATTING', 'OVERZICHT']);
-    const rawConclusions = findSection(['CONCLUSIONS', 'CONCLUSIES', 'INSIGHTS']);
+    const rawConclusions = findSection(['CONCLUSIONS', 'CONCLUSIES', 'INSIGHTS', 'BELANGRIJKSTE_PUNTEN']);
     const rawActions = findSection(['ACTIONS', 'ACTIES', 'TAKEN', 'ACTION_ITEMS']);
     const rawTranscript = findSection(['TRANSCRIPTION', 'TRANSCRIPT', 'TEKST']);
 
     if (rawSummary) data.summary = rawSummary;
-    if (rawConclusions) data.conclusions = rawConclusions.split(/\n-|\n\*|\n\d\./).map(s => s.trim()).filter(s => s.length > 2);
-    if (rawActions) data.actionItems = rawActions.split(/\n-|\n\*|\n\d\./).map(s => s.trim()).filter(s => s.length > 2);
+    if (rawConclusions) data.conclusions = sanitizeArray(rawConclusions.split(/\n/));
+    if (rawActions) data.actionItems = sanitizeArray(rawActions.split(/\n/));
     if (rawTranscript) data.transcription = rawTranscript;
 
-    // 3. Last Resort: Heuristic block search
-    if (!data.summary && text.length > 100) {
-        const parts = text.split(/\n#{1,3}\s+/);
-        if (parts.length > 1) {
-            data.summary = parts[1].trim();
-            if (parts[2]) data.conclusions = parts[2].split('\n').filter(l => l.trim().startsWith('-')).map(l => l.replace(/^-/, '').trim());
-        } else {
-            data.summary = text.substring(0, 1000);
+    // 3. Fallback: If no tags found, check for Markdown headers
+    if (!data.summary && text.length > 50) {
+        const lines = text.split('\n');
+        let currentSection: 'summary' | 'conclusions' | 'actions' | null = 'summary';
+        
+        for (const line of lines) {
+            const lower = line.toLowerCase();
+            if (lower.includes('conclusion') || lower.includes('conclusie')) { currentSection = 'conclusions'; continue; }
+            if (lower.includes('action') || lower.includes('actie') || lower.includes('taken')) { currentSection = 'actions'; continue; }
+            
+            const cleaned = cleanListMarker(line);
+            if (!cleaned) continue;
+
+            if (currentSection === 'summary') data.summary += (data.summary ? ' ' : '') + cleaned;
+            else if (currentSection === 'conclusions') data.conclusions.push(cleaned);
+            else if (currentSection === 'actions') data.actionItems.push(cleaned);
         }
     }
 
@@ -76,8 +91,13 @@ function smartUnwrap(item: any): string {
 }
 
 function sanitizeArray(arr: any): string[] {
-    if (!Array.isArray(arr)) return typeof arr === 'string' ? [arr] : [];
-    return arr.map(item => smartUnwrap(item)).filter(s => s.trim() !== '');
+    if (!Array.isArray(arr)) {
+        if (typeof arr === 'string') {
+            return arr.split('\n').map(line => cleanListMarker(line)).filter(s => s.length > 2);
+        }
+        return [];
+    }
+    return arr.map(item => cleanListMarker(smartUnwrap(item))).filter(s => s.length > 2);
 }
 
 export const processMeetingAudio = async (
@@ -103,7 +123,7 @@ export const processMeetingAudio = async (
     let offset = 0;
     let chunkIndex = 0;
 
-    log("Step 1/3: Storing audio fragments in cloud storage...");
+    log("Step 1/3: Sending meeting to secure cloud storage...");
 
     while (offset < totalBytes) {
         const chunkEnd = Math.min(offset + UPLOAD_CHUNK_SIZE, totalBytes);
@@ -124,7 +144,7 @@ export const processMeetingAudio = async (
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jobId, totalChunks: chunkIndex, mimeType, mode, model, fileSize: totalBytes, uid })
     });
-    if (!triggerResp.ok) throw new Error("Could not initialize parallel processing.");
+    if (!triggerResp.ok) throw new Error("Could not initialize analysis engine.");
 
     let attempts = 0;
     let lastKnownLog = "";
@@ -148,9 +168,9 @@ export const processMeetingAudio = async (
             if (data.status === 'ERROR') throw new Error(data.error);
         }
     }
-    throw new Error("Processing timeout reached.");
+    throw new Error("Analysis engine timed out.");
   } catch (error) {
-    log(`FATAL: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    log(`ERROR: ${error instanceof Error ? error.message : 'Unknown failure'}`);
     throw error;
   }
 };
