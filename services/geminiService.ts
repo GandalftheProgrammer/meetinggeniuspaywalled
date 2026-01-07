@@ -188,7 +188,8 @@ export const processMeetingAudio = async (
       onStepUpdate({ stepId: id, status, detail });
   };
 
-  const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+  const startTime = Date.now();
+  const jobId = `job_${startTime}_${Math.random().toString(36).substring(7)}`;
 
   try {
     // --- STEP 3: ANALYSIS ---
@@ -338,11 +339,38 @@ export const processMeetingAudio = async (
 
             // 2. CHECK FINAL STATE
             if (data.status === 'COMPLETED') {
-                 log(18, "Process Completed Successfully");
                  
                  // Force complete all steps
                  for (let s = 9; s <= 18; s++) setStep(s, 'completed');
                  
+                 // --- FINAL ANALYTICS LOGGING ---
+                 const endTime = Date.now();
+                 const durationSec = ((endTime - startTime) / 1000).toFixed(1);
+                 
+                 // Estimate cost (Roughly $0.075/1M input, $0.30/1M output for 1.5 Flash - adjust for 2.0/3.0 preview pricing as needed)
+                 // Using placeholder rates for Flash
+                 const costInput = (data.usage?.totalInputTokens || 0) / 1_000_000 * 0.075;
+                 const costOutput = (data.usage?.totalOutputTokens || 0) / 1_000_000 * 0.30;
+                 const estCost = (costInput + costOutput).toFixed(6);
+
+                 log(18, "📊 FINAL PERFORMANCE ANALYTICS", {
+                     totalTime: `${durationSec}s`,
+                     estimatedCost: `$${estCost}`,
+                     tokens: {
+                        total: data.usage?.totalTokens,
+                        input: data.usage?.totalInputTokens,
+                        output: data.usage?.totalOutputTokens
+                     },
+                     stopReasons: data.usage?.details?.map((d: any) => `${d.step}: ${d.finishReason || 'OK'}`).join(', '),
+                     rawOutputs: {
+                        summary: data.debug?.rawSummary ? "(Present)" : "(Missing)",
+                        transcript: data.debug?.rawTranscript ? "(Present)" : "(Missing)",
+                        // Actually logging the full content in the expandable object
+                        _fullRawSummary: data.debug?.rawSummary,
+                        _fullRawTranscript: data.debug?.rawTranscript
+                     }
+                 });
+
                  const parsed = extractContent(data.result);
                  if (data.usage) parsed.usage = data.usage;
                  return parsed;

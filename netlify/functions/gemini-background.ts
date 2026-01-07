@@ -118,7 +118,12 @@ export default async (req: Request) => {
             s.usage = { 
                 totalInputTokens: res.usageMetadata.promptTokenCount,
                 totalOutputTokens: res.usageMetadata.candidatesTokenCount,
-                details: [{ step: 'Summary', input: res.usageMetadata.promptTokenCount, output: res.usageMetadata.candidatesTokenCount }]
+                details: [{ 
+                    step: 'Summary', 
+                    input: res.usageMetadata.promptTokenCount, 
+                    output: res.usageMetadata.candidatesTokenCount,
+                    finishReason: res.finishReason
+                }]
             };
             s.status = 'COMPLETED';
             s.events.push({ timestamp: Date.now(), stepId: 14, status: 'completed' });
@@ -159,7 +164,7 @@ export default async (req: Request) => {
         const tasks = fileUris.map(async (uri, idx) => {
             const prompt = `${PROMPT_VERBATIM_TRANSCRIPT}\n(Part ${idx+1})`;
             const res = await callGeminiWithFiles([uri], mimeType, model, encodedKey, prompt);
-            return { index: idx, text: res.text, usage: res.usageMetadata };
+            return { index: idx, text: res.text, usage: res.usageMetadata, finishReason: res.finishReason };
         });
         
         const results = await Promise.all(tasks);
@@ -170,9 +175,12 @@ export default async (req: Request) => {
         
         let totalInput = 0;
         let totalOutput = 0;
+        const reasons: string[] = [];
+        
         results.forEach(r => {
              totalInput += r.usage.promptTokenCount;
              totalOutput += r.usage.candidatesTokenCount;
+             if (r.finishReason) reasons.push(r.finishReason);
         });
 
         // 4. Save Result
@@ -181,7 +189,12 @@ export default async (req: Request) => {
             s.usage = { 
                 totalInputTokens: totalInput,
                 totalOutputTokens: totalOutput,
-                details: [{ step: 'Transcript', input: totalInput, output: totalOutput }]
+                details: [{ 
+                    step: 'Transcript', 
+                    input: totalInput, 
+                    output: totalOutput,
+                    finishReason: [...new Set(reasons)].join(', ') // unique reasons
+                }]
             };
             s.status = 'COMPLETED';
             s.events.push({ timestamp: Date.now(), stepId: 15, status: 'completed' });
@@ -281,6 +294,7 @@ async function callGeminiWithFiles(fileUris: string[], mimeType: string, model: 
     const data = await resp.json();
     return {
         text: data.candidates?.[0]?.content?.parts?.[0]?.text || "",
-        usageMetadata: data.usageMetadata || { promptTokenCount: 0, candidatesTokenCount: 0 }
+        usageMetadata: data.usageMetadata || { promptTokenCount: 0, candidatesTokenCount: 0 },
+        finishReason: data.candidates?.[0]?.finishReason || 'UNKNOWN'
     };
 }

@@ -40,27 +40,23 @@ export default async (req: Request) => {
         const sumDone = summaryState.status === 'COMPLETED' || summaryState.status === 'ERROR';
         const transDone = transcriptState.status === 'COMPLETED' || transcriptState.status === 'ERROR';
 
-        // Check completion logic
-        // Note: Logic depends on what tasks were actually requested. 
-        // We assume if data is present it was requested.
-        // If neither exists yet, we are processing.
-        
         if (summaryState.status === 'COMPLETED' && transcriptState.status === 'COMPLETED') {
             overallStatus = 'COMPLETED';
         } 
-        // If one failed and the other is done/failed
         else if ((sumDone && transDone) && (summaryState.status === 'ERROR' || transcriptState.status === 'ERROR')) {
-            // Both finished but at least one error
              if (summaryState.status === 'ERROR' && transcriptState.status === 'ERROR') {
                  overallStatus = 'ERROR';
              } else {
-                 // Partial success is treated as COMPLETED for the UI to show what we have
-                 overallStatus = 'COMPLETED';
+                 overallStatus = 'COMPLETED'; // Partial success
              }
         }
 
-        // Aggregate Results
-        const resultText = `${summaryState.result || ''}\n\n${transcriptState.result || ''}`.trim();
+        // Aggregate Results with separator
+        let resultText = summaryState.result || '';
+        if (transcriptState.result) {
+            // Force a separator if we have both, or if we just have transcript
+            resultText += `\n\n[TRANSCRIPT]\n\n${transcriptState.result}`;
+        }
 
         // Aggregate Usage
         let totalInput = 0; 
@@ -88,7 +84,13 @@ export default async (req: Request) => {
                 totalTokens: totalInput + totalOutput,
                 details: usageDetails
             },
-            // Propagate error message if global fail
+            // Include raw output for debugging as requested
+            debug: {
+                rawSummary: summaryState.result,
+                rawTranscript: transcriptState.result,
+                summaryStatus: summaryState.status,
+                transcriptStatus: transcriptState.status
+            },
             error: overallStatus === 'ERROR' ? (summaryState.error || transcriptState.error) : undefined
         };
 
