@@ -10,6 +10,11 @@ const PROMPT_SUMMARY_AND_ACTIONS = `
 You are an expert meeting analyst. You are provided with the audio of a full meeting.
 Your task is to analyze the interaction and output structured notes.
 
+CRITICAL INSTRUCTION:
+You have a HUGE context window. 
+DO NOT SUMMARIZE BRIEFLY. BE EXTREMELY DETAILED.
+PROCESS THE ENTIRE AUDIO FILE FROM START TO FINISH.
+
 STRICT OUTPUT FORMAT RULES:
 1. Output MUST be in the native language of the speakers (headers must be in English).
 2. Do NOT use markdown bolding (double asterisks) in headers or lists.
@@ -17,14 +22,16 @@ STRICT OUTPUT FORMAT RULES:
 4. Use the following specific (English) headers to separate sections:
 
 [Summary]
-Provide a summary by describing the relevant things that were discussed.
+Provide a VERY EXTENSIVE, CHRONOLOGICAL summary of the discussion. 
+- Capture all main topics, nuances, and arguments.
+- Do not leave out details for brevity.
 
 [Conclusions & Insights]
-List the key conclusions and insights.
+List ALL key conclusions and insights.
 - Conclusion/insight 1
 
 [Action Points]
-List of agreed action items.
+List ALL agreed action items.
 - [ ] Person: Task description
 
 DO NOT output a transcription in this step. ONLY the notes.
@@ -42,6 +49,17 @@ CRITICAL RULES:
 `;
 
 // ==================================================================================
+// 📏 TOKEN DEFINITIONS
+// ==================================================================================
+const MAX_OUTPUT_TOKENS = 8192;   // Strict Limit for Gemini Flash/Pro Output
+const MAX_INPUT_TOKENS = 1048576; // 1M Token Context Window
+const MAX_TOTAL_TOKENS = MAX_INPUT_TOKENS + MAX_OUTPUT_TOKENS;
+
+// Thinking Budget Strategy:
+// Summary: ~1500 output needed. 8192 - 1500 = ~6600. We set 6000 for thinking to maximize quality.
+// Transcript: Needs max text output. We set 0 for thinking.
+const SUMMARY_THINKING_BUDGET = 6000; 
+const TRANSCRIPT_THINKING_BUDGET = 0;
 
 export default async (req: Request) => {
   if (req.method !== 'POST') return new Response("OK");
@@ -123,14 +141,24 @@ export default async (req: Request) => {
     };
 
     // --- HELPER: WRAPPED GEMINI CALL ---
-    const wrappedGeminiCall = async (fileUris: string[], prompt: string, context: string) => {
+    const wrappedGeminiCall = async (fileUris: string[], prompt: string, context: string, thinkingBudget?: number) => {
         const start = Date.now();
-        const res = await callGeminiWithFiles(fileUris, mimeType, model, encodedKey, prompt);
+        
+        // We use the strict constants defined at the top
+        const outputLimit = MAX_OUTPUT_TOKENS; 
+        
+        const res = await callGeminiWithFiles(fileUris, mimeType, model, encodedKey, prompt, outputLimit, thinkingBudget);
         const duration = Date.now() - start;
         
         logTechnical('Gemini', context, {
             files: fileUris,
             model,
+            tokenLimits: {
+                maxOutput: MAX_OUTPUT_TOKENS,
+                maxInput: MAX_INPUT_TOKENS,
+                maxTotal: MAX_TOTAL_TOKENS,
+                thinkingBudget: thinkingBudget ?? 'DEFAULT'
+            },
             promptLen: prompt.length,
             durationMs: duration,
             finishReason: res.finishReason,
@@ -155,7 +183,8 @@ export default async (req: Request) => {
         const res = await wrappedGeminiCall(
             [uri], 
             PROMPT_SUMMARY_AND_ACTIONS,
-            'Summary Generation'
+            'Summary Generation',
+            SUMMARY_THINKING_BUDGET // <--- 6000 Tokens for Thinking
         );
 
         // 4. Save Result
@@ -210,7 +239,8 @@ export default async (req: Request) => {
         
         const tasks = fileUris.map(async (uri, idx) => {
             const prompt = `${PROMPT_VERBATIM_TRANSCRIPT}\n(Part ${idx+1})`;
-            const res = await wrappedGeminiCall([uri], prompt, `Transcript Part ${idx+1}`);
+            // Pass 0 for thinking budget to disable it for transcripts
+            const res = await wrappedGeminiCall([uri], prompt, `Transcript Part ${idx+1}`, TRANSCRIPT_THINKING_BUDGET);
             return { 
                 index: idx, 
                 text: res.text, 
@@ -326,10 +356,26 @@ async function waitForFileActive(fileUri: string, encodedKey: string) {
     }
 }
 
-async function callGeminiWithFiles(fileUris: string[], mimeType: string, model: string, encodedKey: string, promptText: string) {
+async function callGeminiWithFiles(fileUris: string[], mimeType: string, model: string, encodedKey: string, promptText: string, maxOutputTokens: number, thinkingBudget?: number) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodedKey}`;
     const parts: any[] = fileUris.map(uri => ({ file_data: { file_uri: uri, mime_type: mimeType } }));
     parts.push({ text: promptText });
+
+    const config: any = { 
+        maxOutputTokens: maxOutputTokens, 
+        maxInputTokens: MAX_INPUT_TOKENS, // 1M explicit
+        maxTotalTokens: MAX_TOTAL_TOKENS, // 1M + 8192 explicit
+        temperature: 0.2,
+        topP: 0.95, 
+        topK: 40    
+    };
+
+    // Apply Thinking Budget if provided (6000 for summary, 0 for transcript)
+    // Note: 0 effectively disables it or minimizes it depending on model, 
+    // ensuring max tokens are available for text output.
+    if (thinkingBudget !== undefined) {
+        config.thinkingConfig = { thinkingBudget: thinkingBudget };
+    }
 
     const resp = await fetch(url, {
         method: 'POST',
@@ -337,7 +383,7 @@ async function callGeminiWithFiles(fileUris: string[], mimeType: string, model: 
         body: JSON.stringify({
             contents: [{ parts }],
             system_instruction: { parts: [{ text: "You are a precise transcriber/analyst. Do not hallucinate." }] },
-            generationConfig: { maxOutputTokens: 32768, temperature: 0.2 }
+            generationConfig: config
         })
     });
 
