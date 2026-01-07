@@ -320,10 +320,14 @@ function extractContent(text: string): MeetingData {
         let bestIndex = -1;
 
         for (const kw of headerKeywords) {
-            // RELAXED REGEX: Matches header at start of line OR start of string.
-            // Tolerates [Header], ## Header, or just Header:
-            // Does NOT require a newline immediately after, allowing "[Header] Content..."
-            const regex = new RegExp(`(?:^|\\n|\\r)[\\s\\#\\*\\[]*${kw}[\\s\\]\\*\\:]*`, 'i');
+            // IMPROVED REGEX:
+            // 1. Matches start of line/string + prefix chars
+            // 2. Matches the keyword (e.g. "Conclusions")
+            // 3. [^\\]\\n\\r]* : Matches ANY char that is NOT a ']' or Newline. (Consumes " & Insights")
+            // 4. [\\]\\:]* : Consumes the closing bracket or colon if present.
+            // This ensures we get the FULL header line, but stop before the content starts.
+            const regex = new RegExp(`(?:^|\\n|\\r)[\\s\\#\\*\\[]*${kw}[^\\]\\n\\r]*[\\]\\:]*`, 'i');
+            
             const match = normalizedText.match(regex);
             if (match && match.index !== undefined) {
                 bestIndex = match.index + match[0].length;
@@ -335,26 +339,21 @@ function extractContent(text: string): MeetingData {
             return "";
         }
 
-        // Search for the Next Header to know where to stop
-        // We prioritize English headers since the prompt enforces them.
-        // We REMOVE generic Dutch words like 'Acties' from the STOP list to prevent false positives 
-        // if they appear in the text body (e.g. "We bespraken acties...").
         const allHeaders = [
             'Summary', 
             'Conclusions', 'Insights',
-            'Action Points', 'Action Items', // Specific enough to be safe
+            'Action Points', 'Action Items', 
             'Transcription', 'Transcript'
         ]; 
         
         let nearestNextHeaderIndex = normalizedText.length;
 
         for (const otherH of allHeaders) {
-             const regex = new RegExp(`(?:^|\\n|\\r)[\\s\\#\\*\\[]*${otherH}[\\s\\]\\*\\:]*`, 'i');
+             const regex = new RegExp(`(?:^|\\n|\\r)[\\s\\#\\*\\[]*${otherH}[^\\]\\n\\r]*[\\]\\:]*`, 'i');
              const remainingText = normalizedText.slice(bestIndex);
              const match = remainingText.match(regex);
              if (match && match.index !== undefined) {
                  const absoluteIndex = bestIndex + match.index;
-                 // Ensure we aren't finding the exact same header we just found
                  if (absoluteIndex > bestIndex && absoluteIndex < nearestNextHeaderIndex) {
                      nearestNextHeaderIndex = absoluteIndex;
                  }
@@ -364,8 +363,6 @@ function extractContent(text: string): MeetingData {
         return cleanMarkdown(normalizedText.slice(bestIndex, nearestNextHeaderIndex));
     };
 
-    // We still look for Dutch headers to START a section (fallback), 
-    // but rely on English headers to END a section.
     data.summary = extractSection(['Summary', 'Samenvatting']);
     
     data.conclusions = extractSection(['Conclusions', 'Conclusies', 'Insights', 'Inzichten'])

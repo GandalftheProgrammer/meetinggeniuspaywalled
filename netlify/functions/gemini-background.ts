@@ -36,10 +36,11 @@ const PROMPT_VERBATIM_TRANSCRIPT = `
 You are a professional transcriber. You are provided with a specific segment of a meeting.
 Your task is to transcribe this audio segment VERBATIM (word-for-word).
 
-RULES:
-1. Do not summarize. Do not leave out "uhms" or stutters if they change meaning, but generally keep it readable.
-2. If the audio is silent or just noise, output nothing.
-3. Output strictly the transcript text, no intro or outro.
+CRITICAL RULES:
+1. TRANSCRIPT ONLY: Do not summarize.
+2. NO HALLUCINATIONS: If the audio is silent, background noise, or unintelligible, output NOTHING. Do not guess.
+3. NO LOOPS: Do NOT repeat words (like "ja ja ja" or "uh uh uh") in a loop. If a word is repeated purely as a stutter, write it once.
+4. Output strictly the transcript text, no intro or outro.
 `;
 
 // ==================================================================================
@@ -289,7 +290,8 @@ async function callGeminiWithFiles(fileUris: string[], mimeType: string, model: 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             contents: [{ parts }],
-            system_instruction: { parts: [{ text: "You are a precise data processing engine. Do not output conversational filler." }] },
+            // Stronger system instruction to prevent looping/hallucination
+            system_instruction: { parts: [{ text: "You are a precise transcriber. You DO NOT hallucinate. You DO NOT get stuck in repetition loops. If audio is unclear, output nothing." }] },
             // CORRECTED: CamelCase for REST API compatibility
             generationConfig: { maxOutputTokens: 8192, temperature: 0.2 }
         })
