@@ -186,14 +186,18 @@ export default async (req: Request) => {
         
         let totalInput = 0;
         let totalOutput = 0;
-        let totalDuration = 0;
-        const reasons: string[] = [];
         
-        results.forEach(r => {
+        // Create granular details for every segment
+        const transcriptDetails = results.map(r => {
              totalInput += r.usage.promptTokenCount;
              totalOutput += r.usage.candidatesTokenCount;
-             totalDuration += r.duration;
-             if (r.finishReason) reasons.push(r.finishReason);
+             return {
+                 step: `Transcript Part ${r.index + 1}`,
+                 input: r.usage.promptTokenCount,
+                 output: r.usage.candidatesTokenCount,
+                 finishReason: r.finishReason,
+                 duration: r.duration
+             };
         });
 
         // 4. Save Result
@@ -202,13 +206,7 @@ export default async (req: Request) => {
             s.usage = { 
                 totalInputTokens: totalInput,
                 totalOutputTokens: totalOutput,
-                details: [{ 
-                    step: `Transcript (Merged ${results.length} Parts)`, 
-                    input: totalInput, 
-                    output: totalOutput,
-                    finishReason: [...new Set(reasons)].join(', '), // unique reasons
-                    duration: totalDuration
-                }]
+                details: transcriptDetails // Granular list instead of merged
             };
             s.status = 'COMPLETED';
             s.events.push({ timestamp: Date.now(), stepId: 15, status: 'completed' });
