@@ -57,9 +57,8 @@ const MAX_TOTAL_TOKENS = MAX_INPUT_TOKENS + MAX_OUTPUT_TOKENS;
 
 // Thinking Budget Strategy:
 // Summary: ~1500 output needed. 8192 - 1500 = ~6600. We set 6000 for thinking to maximize quality.
-// Transcript: Needs max text output. We set 0 for thinking.
+// Transcript: We do NOT define a thinking budget.
 const SUMMARY_THINKING_BUDGET = 6000; 
-const TRANSCRIPT_THINKING_BUDGET = 0;
 
 export default async (req: Request) => {
   if (req.method !== 'POST') return new Response("OK");
@@ -157,7 +156,7 @@ export default async (req: Request) => {
                 maxOutput: MAX_OUTPUT_TOKENS,
                 maxInput: MAX_INPUT_TOKENS,
                 maxTotal: MAX_TOTAL_TOKENS,
-                thinkingBudget: thinkingBudget ?? 'DEFAULT'
+                thinkingBudget: thinkingBudget ?? 'NONE'
             },
             promptLen: prompt.length,
             durationMs: duration,
@@ -239,8 +238,8 @@ export default async (req: Request) => {
         
         const tasks = fileUris.map(async (uri, idx) => {
             const prompt = `${PROMPT_VERBATIM_TRANSCRIPT}\n(Part ${idx+1})`;
-            // Pass 0 for thinking budget to disable it for transcripts
-            const res = await wrappedGeminiCall([uri], prompt, `Transcript Part ${idx+1}`, TRANSCRIPT_THINKING_BUDGET);
+            // DO NOT PASS THINKING BUDGET FOR TRANSCRIPTS
+            const res = await wrappedGeminiCall([uri], prompt, `Transcript Part ${idx+1}`);
             return { 
                 index: idx, 
                 text: res.text, 
@@ -370,9 +369,8 @@ async function callGeminiWithFiles(fileUris: string[], mimeType: string, model: 
         topK: 40    
     };
 
-    // Apply Thinking Budget if provided (6000 for summary, 0 for transcript)
-    // Note: 0 effectively disables it or minimizes it depending on model, 
-    // ensuring max tokens are available for text output.
+    // Apply Thinking Budget if provided (6000 for summary, undefined for transcript)
+    // Note: If undefined, thinkingConfig is not sent, disabling the feature or using default model behavior.
     if (thinkingBudget !== undefined) {
         config.thinkingConfig = { thinkingBudget: thinkingBudget };
     }
