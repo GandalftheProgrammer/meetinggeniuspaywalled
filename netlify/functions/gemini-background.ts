@@ -24,7 +24,7 @@ export default async (req: Request) => {
 
     const updateStatus = async (msg: string) => { 
         console.log(`[Background] ${msg}`); 
-        const currentData = await resultStore.get(jobId, { type: "json" }) || { status: 'PROCESSING' };
+        const currentData = await resultStore.get(jobId, { type: "json" }) as any || { status: 'PROCESSING' };
         await resultStore.setJSON(jobId, { ...currentData, lastLog: msg });
     };
 
@@ -97,7 +97,7 @@ export default async (req: Request) => {
     const totalDurationSeconds = parseFloat(durationStr.replace('s', '')) || (fileSize / 16000);
 
     // --- 2. PARALLEL SWARM ---
-    await updateStatus("Step 2/3: Launching analysis swarm...");
+    await updateStatus(`Step 2/3: Launching swarm (Duration: ${Math.round(totalDurationSeconds)}s)...`);
 
     const segmentMinutes = 7;
     const totalSegments = Math.ceil(totalDurationSeconds / (segmentMinutes * 60));
@@ -112,8 +112,8 @@ export default async (req: Request) => {
         swarmTasks.push((async () => {
             const result = await callGeminiWithRetry(fileUri, mimeType, "NOTES_ONLY", model, encodedKey);
             completedCount++;
-            await updateStatus(`Swarm progress: ${completedCount}/${totalTasks} active tasks finished.`);
-            return { type: 'NOTES', data: result };
+            await updateStatus(`[DEBUG] Task ${completedCount}/${totalTasks} (SUMMARY) | Tokens: ${result.tokens} | Reason: ${result.finishReason}`);
+            return { type: 'NOTES', data: result.text };
         })());
     }
 
@@ -131,8 +131,10 @@ export default async (req: Request) => {
                 Match the exact language of the speakers. No summaries, only raw text.`;
                 const result = await callGeminiWithRetry(fileUri, mimeType, "SEGMENT", model, encodedKey, prompt);
                 completedCount++;
-                await updateStatus(`Swarm progress: ${completedCount}/${totalTasks} active tasks finished.`);
-                return { type: 'TRANSCRIPT', index: s, data: result };
+                const first50 = result.text.substring(0, 50).replace(/\n/g, ' ');
+                const last50 = result.text.substring(Math.max(0, result.text.length - 50)).replace(/\n/g, ' ');
+                await updateStatus(`[DEBUG] Task ${completedCount}/${totalTasks} (SEGMENT ${s}) | Tokens: ${result.tokens} | Range: ${startFmt}-${endFmt} | Start: "${first50}..." | End: "...${last50}"`);
+                return { type: 'TRANSCRIPT', index: s, data: result.text };
             })());
         }
     }
@@ -184,7 +186,7 @@ function formatSeconds(s: number): string {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
 }
 
-async function callGeminiWithRetry(fileUri: string, mimeType: string, mode: string, model: string, encodedKey: string, customPrompt?: string): Promise<string> {
+async function callGeminiWithRetry(fileUri: string, mimeType: string, mode: string, model: string, encodedKey: string, customPrompt?: string): Promise<{text: string, tokens: number, finishReason: string}> {
     for (let i = 0; i < 3; i++) {
         try {
             return await callGemini(fileUri, mimeType, mode, model, encodedKey, customPrompt);
@@ -193,10 +195,10 @@ async function callGeminiWithRetry(fileUri: string, mimeType: string, mode: stri
             await new Promise(r => setTimeout(r, 4000 * (i + 1)));
         }
     }
-    return "";
+    return { text: "", tokens: 0, finishReason: "FAILED" };
 }
 
-async function callGemini(fileUri: string, mimeType: string, mode: string, model: string, encodedKey: string, customPrompt?: string): Promise<string> {
+async function callGemini(fileUri: string, mimeType: string, mode: string, model: string, encodedKey: string, customPrompt?: string): Promise<{text: string, tokens: number, finishReason: string}> {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodedKey}`;
 
     const systemInstruction = `You are a robotic, high-precision meeting processor. 
@@ -238,5 +240,10 @@ async function callGemini(fileUri: string, mimeType: string, mode: string, model
 
     if (!resp.ok) throw new Error(`Model error: ${resp.status}`);
     const data = await resp.json();
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    const tokens = data.usageMetadata?.candidatesTokenCount || 0;
+    const finishReason = data.candidates?.[0]?.finishReason || "UNKNOWN";
+    
+    return { text, tokens, finishReason };
 }

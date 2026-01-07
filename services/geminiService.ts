@@ -159,12 +159,22 @@ export const processMeetingAudio = async (
         });
 
         if (pollResp.ok) {
-            const data = await pollResp.json();
+            const responseText = await pollResp.text();
+            const payloadSizeKB = (responseText.length / 1024).toFixed(2);
+            
+            const data = JSON.parse(responseText);
             if (data.lastLog && data.lastLog !== lastKnownLog) {
-                log(data.lastLog);
+                log(`${data.lastLog}`);
                 lastKnownLog = data.lastLog;
+            } else if (attempts % 10 === 0) {
+                // Heartbeat log
+                log(`[POLL] Heartbeat ${attempts} | Payload: ${payloadSizeKB}KB`);
             }
-            if (data.status === 'COMPLETED') return extractContent(data.result);
+            
+            if (data.status === 'COMPLETED') {
+                log(`[COMPLETED] Total attempts: ${attempts} | Final payload size: ${payloadSizeKB}KB`);
+                return extractContent(data.result);
+            }
             if (data.status === 'ERROR') throw new Error(data.error);
         }
     }
