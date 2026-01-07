@@ -240,6 +240,14 @@ const Recorder: React.FC<RecorderProps> = ({
                         if (match) percent = parseInt(match[1]);
                     }
 
+                    // Cleaning up the detail text display
+                    // If done, never show percentage. If active, show it.
+                    let displayDetail = step.detail;
+                    if (isDone && displayDetail && displayDetail.includes('%')) {
+                        // Strip percentage from completed steps to avoid "87%" hanging
+                        displayDetail = displayDetail.replace(/\s*\(\d+%\)/, '');
+                    }
+
                     return (
                         <div 
                             key={step.id} 
@@ -256,21 +264,22 @@ const Recorder: React.FC<RecorderProps> = ({
                                     <p className={`text-sm font-semibold ${isActive ? 'text-blue-700' : isDone ? 'text-slate-700' : isError ? 'text-red-600' : 'text-slate-400'}`}>
                                         {step.label}
                                     </p>
-                                    {step.detail && (
+                                    {displayDetail && (
                                         <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded-full ${isActive ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-500'}`}>
-                                            {step.detail}
+                                            {displayDetail}
                                         </span>
                                     )}
                                 </div>
                                 {isActive && (
-                                    <div className="h-1 w-full bg-slate-100 rounded-full mt-2 overflow-hidden">
+                                    <div className="h-1.5 w-full bg-slate-200 rounded-full mt-2 overflow-hidden relative">
                                         {percent > 0 ? (
                                             <div 
                                                 className="h-full bg-blue-500 transition-all duration-300 ease-out rounded-full"
                                                 style={{ width: `${percent}%` }}
                                             />
                                         ) : (
-                                            <div className="h-full bg-blue-500 animate-[shimmer_2s_infinite_linear] w-[40%] rounded-full relative overflow-hidden after:absolute after:inset-0 after:bg-gradient-to-r after:from-transparent after:via-white/30 after:to-transparent after:animate-[shimmer_1s_infinite]"></div>
+                                            /* FAKE PROGRESS: Animates from 0 to 85% over 15s and hangs there */
+                                            <div className="h-full bg-blue-500 rounded-full animate-[fakeProgress_15s_cubic-bezier(0.4,0,0.2,1)_forwards]"></div>
                                         )}
                                     </div>
                                 )}

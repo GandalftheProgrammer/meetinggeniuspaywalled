@@ -303,7 +303,7 @@ export const processMeetingAudio = async (
   }
 };
 
-// --- ROBUST FUZZY PARSER ---
+// --- ROBUST FUZZY PARSER (Multi-lingual) ---
 function extractContent(text: string): MeetingData {
     const data: MeetingData = { transcription: '', summary: '', conclusions: [], actionItems: [] };
     if (!text) return data;
@@ -316,31 +316,17 @@ function extractContent(text: string): MeetingData {
     // The fuzzy extraction logic
     const extractSection = (headerKeywords: string[]): string => {
         // Construct a flexible Regex
-        // 1. (?:^|\n): Start of string or new line
-        // 2. [\s\#\*\[]*: Optional whitespace, hash, asterisks, or opening brackets
-        // 3. (${headerKeywords.join('|')}): The keyword (case insensitive)
-        // 4. [\s\]\*\:]*: Optional whitespace, closing brackets, asterisks, or colons
-        // 5. (?:\n|$): End of line
-        // 6. ([\s\S]*?): Capture EVERYTHING after...
-        // 7. (?=(?:^|\n)[\s\#\*\[]*(?:Summary|Conclusions|Action|Transcription)|$): ...until the next major header or end of string
-        
-        // We use a simplified approach: Find the start index of the header, then find the start index of the NEXT header.
-        
         const normalizedText = text;
-        const lowerText = normalizedText.toLowerCase();
         
         // Find best match for header
         let bestIndex = -1;
-        let bestHeaderLen = 0;
 
         for (const kw of headerKeywords) {
             // Regex to find "Header" surrounded by likely Markdown chars, at start of a line
             const regex = new RegExp(`(?:^|\\n)[\\s\\#\\*\\[]*${kw}[\\s\\]\\*\\:]*(?:\\n|$)`, 'i');
             const match = normalizedText.match(regex);
             if (match && match.index !== undefined) {
-                // found it
                 bestIndex = match.index + match[0].length;
-                bestHeaderLen = match[0].length;
                 break;
             }
         }
@@ -348,15 +334,19 @@ function extractContent(text: string): MeetingData {
         if (bestIndex === -1) return "";
 
         // Now find the end of this section by looking for the start of ANY other section
-        // We look for other known headers: Summary, Conclusions, Action, Transcription
-        const allHeaders = ['Summary', 'Conclusions', 'Action Points', 'Transcription', 'Action Items']; 
+        // We look for all known headers in BOTH English and Dutch
+        const allHeaders = [
+            'Summary', 'Samenvatting',
+            'Conclusions', 'Conclusies', 'Insights', 'Inzichten',
+            'Action', 'Actie', 'Acties',
+            'Transcription', 'Transcript', 'Transcriptie'
+        ]; 
         
         let nearestNextHeaderIndex = normalizedText.length;
 
         for (const otherH of allHeaders) {
              const regex = new RegExp(`(?:^|\\n)[\\s\\#\\*\\[]*${otherH}[\\s\\]\\*\\:]*(?:\\n|$)`, 'i');
              // We need to find matches AFTER bestIndex
-             // Simple slice check
              const remainingText = normalizedText.slice(bestIndex);
              const match = remainingText.match(regex);
              if (match && match.index !== undefined) {
@@ -370,18 +360,20 @@ function extractContent(text: string): MeetingData {
         return cleanMarkdown(normalizedText.slice(bestIndex, nearestNextHeaderIndex));
     };
 
-    data.summary = extractSection(['Summary']);
-    data.conclusions = extractSection(['Conclusions & Insights', 'Conclusions'])
+    // Include both English and Dutch keywords to be safe
+    data.summary = extractSection(['Summary', 'Samenvatting']);
+    
+    data.conclusions = extractSection(['Conclusions', 'Conclusies', 'Insights', 'Inzichten'])
                         .split('\n')
                         .map(cleanListItem)
                         .filter(l => l.length > 2);
 
-    data.actionItems = extractSection(['Action Points', 'Action Items', 'Actions'])
+    data.actionItems = extractSection(['Action', 'Actie', 'Acties'])
                         .split('\n')
                         .map(cleanListItem)
                         .filter(l => l.length > 2);
 
-    data.transcription = extractSection(['Transcription', 'Transcript']);
+    data.transcription = extractSection(['Transcription', 'Transcript', 'Transcriptie']);
 
     return data;
 }
