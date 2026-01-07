@@ -194,7 +194,8 @@ export const processMeetingAudio = async (
         const totalBytes = segmentBlob.size;
         const totalChunks = Math.ceil(totalBytes / CHUNK_SIZE);
         
-        setStep(8, 'processing', `Uploading seg ${i+1}/${totalSegments}`);
+        // Initial Step 8 state
+        setStep(8, 'processing', `Uploading seg ${i+1}/${totalSegments} (0%)`);
         log(8, `Uploading Segment ${i}`, { totalBytes, totalChunks });
         
         for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
@@ -215,12 +216,18 @@ export const processMeetingAudio = async (
                     data: base64 
                 })
             });
+            
             if (!up.ok) throw new Error(`Upload failed for segment ${i} chunk ${chunkIdx}`);
             const chunkEnd = performance.now();
+
+            // Granular Progress Update for UI
+            const percent = Math.round(((chunkIdx + 1) / totalChunks) * 100);
+            setStep(8, 'processing', `Seg ${i+1}/${totalSegments} (${percent}%)`);
             
             log(8, `Chunk ${chunkIdx}/${totalChunks} Uploaded`, { 
                 size: chunk.size, 
                 durationMs: (chunkEnd - chunkStart).toFixed(0),
+                progress: `${percent}%`,
                 status: up.status
             });
         }
@@ -263,13 +270,16 @@ export const processMeetingAudio = async (
             
             // Sync Remote Steps
             if (data.currentStepId && data.currentStepStatus) {
-                // If step changed, log it to console
-                if (data.currentStepId !== lastRemoteStep || data.currentStepStatus === 'completed') {
-                    log(data.currentStepId, `Remote Status: ${data.currentStepStatus}`, { 
-                        detail: data.currentStepDetail,
-                        serverMetadata: data.metadata 
-                    });
-                    lastRemoteStep = data.currentStepId;
+                // If step changed OR detail changed (for granular progress), log/update
+                if (data.currentStepId !== lastRemoteStep || data.currentStepStatus === 'completed' || data.currentStepDetail) {
+                    // Only log to console if ID changed or status completed to avoid spamming "35%.. 36%.."
+                    if (data.currentStepId !== lastRemoteStep || data.currentStepStatus === 'completed') {
+                         log(data.currentStepId, `Remote Status: ${data.currentStepStatus}`, { 
+                            detail: data.currentStepDetail,
+                            serverMetadata: data.metadata 
+                        });
+                        lastRemoteStep = data.currentStepId;
+                    }
                 }
                 setStep(data.currentStepId, data.currentStepStatus, data.currentStepDetail);
             }
@@ -301,7 +311,10 @@ function extractContent(text: string): MeetingData {
 
     const findSection = (tags: string[]) => {
         for (const tag of tags) {
-            const regex = new RegExp(`\\[${tag}\\]([\\s\\S]*?)(?=\\[|$)`, 'i');
+            // Case insensitive match for the tag inside brackets, e.g. [CONCLUSIONS & INSIGHTS] or [CONCLUSIONS]
+            // We escape special regex characters in the tag (like &)
+            const escapedTag = tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); 
+            const regex = new RegExp(`\\[${escapedTag}\\]([\\s\\S]*?)(?=\\[|$)`, 'i');
             const match = text.match(regex);
             if (match) {
                 return cleanMarkdown(match[1]);
@@ -311,7 +324,8 @@ function extractContent(text: string): MeetingData {
     };
 
     data.summary = findSection(['SUMMARY']) || '';
-    const rawConclusions = findSection(['CONCLUSIONS']) || '';
+    // Looks for 'CONCLUSIONS & INSIGHTS' first, then 'CONCLUSIONS' as fallback
+    const rawConclusions = findSection(['CONCLUSIONS & INSIGHTS', 'CONCLUSIONS']) || '';
     const rawActions = findSection(['ACTIONS']) || '';
     data.transcription = findSection(['TRANSCRIPTION']) || '';
 

@@ -145,7 +145,12 @@ export default async (req: Request) => {
                     },
                     body: toSend
                 });
+                
                 offset += CHUNK_SIZE;
+                
+                // Update granular progress for UI
+                const progress = Math.min(99, Math.round((offset / totalSize) * 100));
+                await setStep(11, 'processing', `Seg ${segIdx+1} (${progress}%)`);
             }
         }
 
