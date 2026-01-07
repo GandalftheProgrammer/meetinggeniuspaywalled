@@ -10,14 +10,8 @@ let folderLock: Promise<string> | null = null;
 const subFolderCache: Record<string, string> = {};
 let globalStatusCallback: ((token: string | null) => void) | null = null;
 
-/**
- * Returns the current access token if available.
- */
 export const getAccessToken = () => accessToken;
 
-/**
- * Initializes the Drive code client.
- */
 export const initDrive = (uid: string | undefined, callback: (token: string | null) => void) => {
   if (typeof google === 'undefined' || !google.accounts?.oauth2) return;
   if (codeClient) return;
@@ -34,7 +28,6 @@ export const initDrive = (uid: string | undefined, callback: (token: string | nu
     ux_mode: 'popup',
     callback: async (response: any) => {
       if (response.code && uid) {
-        // Send code to backend to exchange for refresh token
         try {
           const res = await fetch('/.netlify/functions/drive-handler', {
             method: 'POST',
@@ -56,18 +49,11 @@ export const initDrive = (uid: string | undefined, callback: (token: string | nu
   });
 };
 
-/**
- * Triggers the official Google Auth popup to get a refresh token.
- */
 export const connectToDrive = () => {
   if (!codeClient) return;
   codeClient.requestCode();
 };
 
-/**
- * Passive check: Asks backend for a fresh access token using the stored refresh token.
- * This never triggers a popup.
- */
 export const checkDriveStatus = async (uid: string): Promise<string | null> => {
   try {
     const res = await fetch('/.netlify/functions/drive-handler', {
@@ -95,18 +81,12 @@ export const checkDriveStatus = async (uid: string): Promise<string | null> => {
   return null;
 };
 
-/**
- * Ensures a valid token is available before a cloud task.
- */
 export const ensureValidToken = async (uid?: string): Promise<string | null> => {
   if (accessToken) return accessToken;
   if (!uid) return null;
   return await checkDriveStatus(uid);
 };
 
-/**
- * Disconnects drive and informs the backend to remove the refresh token.
- */
 export const disconnectDrive = async (uid: string) => {
   accessToken = null;
   mainFolderId = null;
@@ -126,8 +106,6 @@ export const disconnectDrive = async (uid: string) => {
   
   if (globalStatusCallback) globalStatusCallback(null);
 };
-
-// --- Helper Functions for Drive operations ---
 
 const getFolderId = async (token: string, name: string, parentId?: string): Promise<string | null> => {
   let q = `mimeType='application/vnd.google-apps.folder' and name='${name}' and trashed=false`;
@@ -171,11 +149,15 @@ const ensureFolder = async (token: string, sub: string): Promise<string> => {
 };
 
 const convertMarkdownToHtml = (md: string): string => {
+    // Process the strict header logic
+    // Header format: [NOTES] Meeting Title OR [TRANSCRIPT] Meeting Title
+    // Then Recorded on [date] at [time]
     let html = md.trim()
-        .replace(/^# (.*$)/gm, '<h1 class="title">$1</h1>')
+        .replace(/^\[NOTES\] (.*$)/gm, '<h1 class="title">Notes $1</h1>')
+        .replace(/^\[TRANSCRIPT\] (.*$)/gm, '<h1 class="title">Transcript $1</h1>')
+        .replace(/^Recorded on (.*)$/gm, '<p class="recorded-on">Recorded on $1</p>')
         .replace(/^## (.*$)/gm, '<h2 class="header">$1</h2>')
         .replace(/^### (.*$)/gm, '<h3 class="subheader">$1</h3>')
-        .replace(/^\*(Recorded on .*)\*$/gm, '<p class="recorded-on">$1</p>')
         .replace(/- \[ \] (.*$)/gm, '<li>☐ $1</li>')
         .replace(/- (.*$)/gm, '<li>$1</li>');
 
@@ -198,7 +180,7 @@ const convertMarkdownToHtml = (md: string): string => {
 <head>
     <style>
         body { font-family: 'Arial', sans-serif; color: #334155; line-height: 1.6; margin: 40px; }
-        .title { color: #1e3a8a; font-size: 26pt; font-weight: bold; margin-bottom: 12pt; margin-top: 0; }
+        .title { color: #1e3a8a; font-size: 26pt; font-weight: bold; margin-bottom: 4pt; margin-top: 0; }
         .recorded-on { color: #64748b; font-style: italic; font-size: 11pt; margin-bottom: 24pt; }
         .header { color: #1e3a8a; font-size: 18pt; font-weight: bold; margin-top: 24pt; margin-bottom: 12pt; }
         .body-text { font-size: 11pt; margin-bottom: 12pt; }
@@ -244,8 +226,9 @@ const uploadFile = async (name: string, content: string | Blob, type: string, su
 };
 
 export const uploadAudioToDrive = (name: string, blob: Blob, uid?: string) => {
-  const cleanType = (blob.type || 'audio/webm').split(';')[0].trim();
-  return uploadFile(name, blob, cleanType, 'Audio', false, uid);
+  // Use audio/mp4 for .m4a naming consistency
+  const mimeType = 'audio/mp4';
+  return uploadFile(name, blob, mimeType, 'Audio', false, uid);
 };
 
 export const uploadTextToDrive = (name: string, content: string, sub: 'Notes' | 'Transcripts', uid?: string) => 

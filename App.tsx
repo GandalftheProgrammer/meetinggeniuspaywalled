@@ -9,7 +9,6 @@ import TermsOfService from './components/TermsOfService';
 import { AppState, MeetingData, ProcessingMode, GeminiModel, UserProfile } from './types';
 import { processMeetingAudio } from './services/geminiService';
 import { initDrive, connectToDrive, uploadAudioToDrive, uploadTextToDrive, disconnectDrive, checkDriveStatus, getAccessToken, ensureValidToken } from './services/driveService';
-// Fix: Added deleteSessionData to imports
 import { saveChunkToDB, getPendingSessions, getChunksForSession, cleanupOldSessions, deleteSessionData } from './services/db';
 import { Zap, Shield, Cloud, Loader2 } from 'lucide-react';
 
@@ -235,9 +234,6 @@ const App: React.FC = () => {
     addLog("Logged out.");
   };
 
-  /**
-   * REORDERED: DRIVE SYNC FIRST
-   */
   const handleProcessAudio = async (mode: ProcessingMode) => {
     if (!combinedBlob || !user) { handleLogin(); return; }
     
@@ -248,17 +244,27 @@ const App: React.FC = () => {
     setError(null);
 
     try {
-      // 1. DRIVE-FIRST: SECURE AUDIO IMMEDIATELY
+      // Construction of strict date and time strings for naming
+      const startTime = sessionStartTime || new Date();
+      const datePart = startTime.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+      const hours = startTime.getHours().toString().padStart(2, '0');
+      const mins = startTime.getMinutes().toString().padStart(2, '0');
+      const timePartFilename = `${hours}h${mins}`;
+      const timePartInternal = `${hours}:${mins}`;
+      const dateTimeStrFilename = `${datePart} at ${timePartFilename}`;
+      const dateTimeStrInternal = `${datePart} at ${timePartInternal}`;
+      
+      const cleanTitle = finalTitle.replace(/[()]/g, '').trim();
+
+      // DRIVE-FIRST: SECURE AUDIO IMMEDIATELY
       if (localStorage.getItem('mg_drive_connected') === 'true') {
         addLog("Securing audio in Google Drive...");
         try {
             const token = await ensureValidToken(user.uid);
             if (token) {
-                const startTime = sessionStartTime || new Date();
-                const dateTimeStr = startTime.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }).replace(' at', '');
-                const safeName = `${finalTitle.replace(/[()]/g, '').trim()} - ${dateTimeStr}`;
-                const ext = combinedBlob.type.includes('wav') ? 'wav' : combinedBlob.type.includes('mp4') ? 'm4a' : 'webm';
-                await uploadAudioToDrive(`${safeName} - audio.${ext}`, combinedBlob, user.uid);
+                // Strict Naming: [Meeting title] on [date] at [time] - [type].m4a
+                const audioFileName = `${cleanTitle} on ${dateTimeStrFilename} - audio.m4a`;
+                await uploadAudioToDrive(audioFileName, combinedBlob, user.uid);
                 addLog("Audio safely backed up to Drive.");
             }
         } catch (e: any) { addLog(`Warning: Drive backup failed, continuing with analysis: ${e.message}`); }
@@ -270,36 +276,29 @@ const App: React.FC = () => {
       // 3. COMPLETE
       setMeetingData(newData);
       setAppState(AppState.COMPLETED);
-      
-      // We no longer automatically delete session data here to maintain 48h retention.
-      // deleteSessionData(sessionIdRef.current).catch(() => {});
-      
       syncUserProfile(user.email, user.uid);
 
       // 4. SYNC RESULTS TO DRIVE
       if (localStorage.getItem('mg_drive_connected') === 'true') {
         addLog("Syncing results to Google Drive...");
-        const startTime = sessionStartTime || new Date();
-        const dateTimeStr = startTime.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }).replace(' at', '');
-        const cleanTitle = finalTitle.replace(/[()]/g, '').trim();
-        const safeBaseName = `${cleanTitle} - ${dateTimeStr}`;
-
         try {
             if (newData.summary || newData.conclusions.length > 0) {
-              const md = `# ${cleanTitle} notes\n*Recorded on ${dateTimeStr}*\n\n${newData.summary}\n\n## Conclusions\n${newData.conclusions.map(i => `- ${i}`).join('\n')}\n\n## Action Items\n${newData.actionItems.map(i => `- ${i}`).join('\n')}`;
-              await uploadTextToDrive(`${safeBaseName} - notes`, md, 'Notes', user.uid);
+              // Internal Content: Title format "Notes [Meeting title]" followed by "Recorded on [date] at [time]"
+              const notesMd = `[NOTES] ${cleanTitle}\nRecorded on ${dateTimeStrInternal}\n\n${newData.summary}\n\n## Conclusions\n${newData.conclusions.map(i => `- ${i}`).join('\n')}\n\n## Action Items\n${newData.actionItems.map(i => `- ${i}`).join('\n')}`;
+              // File Name: [Meeting title] on [date] at [time] - notes.gdoc
+              await uploadTextToDrive(`${cleanTitle} on ${dateTimeStrFilename} - notes`, notesMd, 'Notes', user.uid);
             }
             if (newData.transcription?.trim()) {
-              const tmd = `# ${cleanTitle} transcript\n*Recorded on ${dateTimeStr}*\n\n${newData.transcription}`;
-              await uploadTextToDrive(`${safeBaseName} - transcript`, tmd, 'Transcripts', user.uid);
+              // Internal Content: Title format "Transcript [Meeting title]" followed by "Recorded on [date] at [time]"
+              const transcriptMd = `[TRANSCRIPT] ${cleanTitle}\nRecorded on ${dateTimeStrInternal}\n\n${newData.transcription}`;
+              // File Name: [Meeting title] on [date] at [time] - transcript.gdoc
+              await uploadTextToDrive(`${cleanTitle} on ${dateTimeStrFilename} - transcript`, transcriptMd, 'Transcripts', user.uid);
             }
             addLog("Drive sync completed.");
         } catch (e: any) { addLog(`Drive result sync failed: ${e.message}`); }
       }
       
-      // Trigger rolling cleanup
       cleanupOldSessions();
-      
     } catch (apiError: any) {
       setError(apiError.message || 'Processing failed');
       setAppState(AppState.PAUSED); 
@@ -307,7 +306,6 @@ const App: React.FC = () => {
   };
 
   const handleDiscard = async () => {
-    // Manually discard data if user chooses to
     await deleteSessionData(sessionIdRef.current);
     setAppState(AppState.IDLE);
     audioChunksRef.current = [];
@@ -442,7 +440,7 @@ const App: React.FC = () => {
         {view === 'main' ? (
           <>
             {error && <div className="max-w-md mx-auto mb-8 p-4 bg-red-50 border border-red-200 text-red-700 rounded-xl text-center text-sm font-bold shadow-sm">{error}</div>}
-            {appState !== AppState.COMPLETED ? renderMainView() : meetingData && <Results data={meetingData} title={title} onReset={() => setAppState(AppState.PAUSED)} onGenerateMissing={() => {}} isProcessingMissing={false} isDriveConnected={isDriveConnected} onConnectDrive={handleConnectDrive} audioBlob={combinedBlob} initialMode={lastRequestedMode} sessionDateString={sessionStartTime?.toLocaleString('en-GB', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })} />}
+            {appState !== AppState.COMPLETED ? renderMainView() : meetingData && <Results data={meetingData} title={title} onReset={() => setAppState(AppState.PAUSED)} onGenerateMissing={() => {}} isProcessingMissing={false} isDriveConnected={isDriveConnected} onConnectDrive={handleConnectDrive} audioBlob={combinedBlob} initialMode={lastRequestedMode} sessionDate={sessionStartTime} />}
           </>
         ) : view === 'privacy' ? <PrivacyPolicy onBack={() => handleNavigate('main')} /> : <TermsOfService onBack={() => handleNavigate('main')} />}
       </main>
