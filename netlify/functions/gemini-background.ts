@@ -110,7 +110,8 @@ export default async (req: Request) => {
             mimeType, 
             model, 
             encodedKey, 
-            PROMPT_SUMMARY_AND_ACTIONS
+            PROMPT_SUMMARY_AND_ACTIONS,
+            'SUMMARY'
         );
         const duration = Date.now() - tStart;
 
@@ -167,7 +168,7 @@ export default async (req: Request) => {
         const tasks = fileUris.map(async (uri, idx) => {
             const prompt = `${PROMPT_VERBATIM_TRANSCRIPT}\n(Part ${idx+1})`;
             const tStart = Date.now();
-            const res = await callGeminiWithFiles([uri], mimeType, model, encodedKey, prompt);
+            const res = await callGeminiWithFiles([uri], mimeType, model, encodedKey, prompt, 'TRANSCRIPT');
             const tEnd = Date.now();
             return { 
                 index: idx, 
@@ -284,10 +285,29 @@ async function waitForFileActive(fileUri: string, encodedKey: string) {
     }
 }
 
-async function callGeminiWithFiles(fileUris: string[], mimeType: string, model: string, encodedKey: string, promptText: string) {
+async function callGeminiWithFiles(
+    fileUris: string[], 
+    mimeType: string, 
+    model: string, 
+    encodedKey: string, 
+    promptText: string,
+    taskType: 'SUMMARY' | 'TRANSCRIPT'
+) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodedKey}`;
     const parts: any[] = fileUris.map(uri => ({ file_data: { file_uri: uri, mime_type: mimeType } }));
     parts.push({ text: promptText });
+
+    const config: any = {
+        maxOutputTokens: 8192,
+        temperature: 0.2
+    };
+
+    if (taskType === 'SUMMARY') {
+        // Summary needs thinking logic to organize information. 
+        // 6000 tokens for thinking, leaving 2192 for the summary text (which is usually < 2000).
+        config.thinkingConfig = { thinkingBudget: 6000 };
+    }
+    // For TRANSCRIPT, we explicitly do NOT add thinkingConfig, so it streams verbatim.
 
     const resp = await fetch(url, {
         method: 'POST',
@@ -295,7 +315,7 @@ async function callGeminiWithFiles(fileUris: string[], mimeType: string, model: 
         body: JSON.stringify({
             contents: [{ parts }],
             system_instruction: { parts: [{ text: "You are a precise transcriber/analyst. Do not hallucinate." }] },
-            generationConfig: { maxOutputTokens: 8192, temperature: 0.2 }
+            generationConfig: config
         })
     });
 
